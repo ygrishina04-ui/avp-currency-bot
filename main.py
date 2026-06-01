@@ -170,7 +170,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("курс", kurs))
     app.add_handler(CommandHandler("kurs", kurs))
     app.add_handler(CommandHandler("addrate", add_rate))
     app.add_handler(CommandHandler("status", status))
