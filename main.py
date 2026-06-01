@@ -238,6 +238,7 @@ async def manual_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await broadcast(context.application)
     await update.message.reply_text("Рассылка отправлена ✅")
 
+
 async def broadcast(app: Application):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -254,7 +255,9 @@ async def broadcast(app: Application):
             await app.bot.send_message(chat_id=chat[0], text=message)
         except Exception as e:
             print(f"Ошибка отправки в {chat[0]}: {e}")
-  def auto_broadcast_loop(app: Application):
+
+
+def auto_broadcast_loop(app: Application):
     last_sent_date = None
 
     while True:
