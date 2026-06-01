@@ -149,10 +149,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat.title or chat.first_name or "Личный чат"
     )
 
-await update.message.reply_text(
-    "Бот запущен ✅\n\nВыбери действие в меню ниже:",
-    reply_markup=MENU_KEYBOARD
-)
+    await update.message.reply_text(
+        "Бот запущен ✅\n\nВыбери действие в меню ниже:",
+        reply_markup=MENU_KEYBOARD
+    )
 
 
 async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
