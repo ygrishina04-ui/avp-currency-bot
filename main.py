@@ -198,7 +198,7 @@ async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Например:\n"
             "75.340"
         )
-    async def handle_rate_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_rate_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if chat_id not in waiting_for_rate:
