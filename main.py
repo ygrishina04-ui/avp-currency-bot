@@ -191,32 +191,30 @@ async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text in ["➕ внести курс", "внести курс"]:
         await update.message.reply_text(
-            "Отправь курс в формате:\n\n"
-            "/addrate 76.340 159.42\n\n"
-            "где:\n"
-            "76.340 — USDT/RUB\n"
-            "159.42 — USD/JPY XE"
-        )
+    "Отправь курс USDT/RUB в формате:\n\n"
+    "/addrate 76.340\n\n"
+    "USD/JPY бот заберет автоматически и посчитает минус 1%."
+)
 
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if len(context.args) < 2:
+        if len(context.args) < 1:
             raise ValueError("Недостаточно аргументов")
 
         usdt_rub = float(context.args[0].replace(",", "."))
-        usd_jpy_xe = float(context.args[1].replace(",", "."))
 
-        save_rate(usdt_rub, usd_jpy_xe)
+        save_rate(usdt_rub)
 
         await update.message.reply_text(
             "Курс сохранен ✅\n\n" + build_message()
         )
 
-    except Exception:
+    except Exception as e:
         await update.message.reply_text(
-            "Неверный формат.\n\n"
+            "Не получилось сохранить курс.\n\n"
             "Используй так:\n"
-            "/addrate 76.340 159.42"
+            "/addrate 76.340\n\n"
+            f"Ошибка: {e}"
         )
 
 
