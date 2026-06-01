@@ -1,3 +1,4 @@
+import requests
 import time
 import threading
 from flask import Flask
@@ -22,6 +23,14 @@ MENU_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+def get_usd_jpy_rate():
+    url = "https://api.frankfurter.app/latest?from=USD&to=JPY"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+    return float(data["rates"]["JPY"])
+    
 web_app = Flask(__name__)
 
 @web_app.route("/")
