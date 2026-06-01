@@ -5,7 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
@@ -149,7 +149,12 @@ async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(build_message())
+    
+async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
 
+    if text == "/курс":
+        await kurs(update, context)
 
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -210,6 +215,7 @@ def main():
     app.add_handler(CommandHandler("kurs", kurs))
     app.add_handler(CommandHandler("addrate", add_rate))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(MessageHandler(filters.TEXT, text_commands))
 
     print("Бот запускается...")
 
