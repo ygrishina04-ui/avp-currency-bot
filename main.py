@@ -1,3 +1,4 @@
+import time
 import threading
 from flask import Flask
 import os
@@ -253,6 +254,26 @@ async def broadcast(app: Application):
             await app.bot.send_message(chat_id=chat[0], text=message)
         except Exception as e:
             print(f"Ошибка отправки в {chat[0]}: {e}")
+            def auto_broadcast_loop(app: Application):
+    last_sent_date = None
+
+    while True:
+        now = datetime.now(ZoneInfo(TIMEZONE))
+
+        if now.hour == 11 and now.minute == 0:
+            today = now.strftime("%Y-%m-%d")
+
+            if last_sent_date != today:
+                print("Запускаю автоматическую рассылку курсов...")
+
+                try:
+                    asyncio.run(broadcast(app))
+                    last_sent_date = today
+                    print("Автоматическая рассылка выполнена ✅")
+                except Exception as e:
+                    print(f"Ошибка автоматической рассылки: {e}")
+
+        time.sleep(30)
 
 
 def main():
@@ -276,6 +297,13 @@ def main():
 
     print("Бот запускается...")
     threading.Thread(target=run_web, daemon=True).start()
+
+    threading.Thread(
+    target=auto_broadcast_loop,
+    args=(app,),
+    daemon=True
+    ).start()
+
     app.run_polling(close_loop=False)
 
 
