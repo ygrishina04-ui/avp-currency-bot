@@ -190,7 +190,31 @@ async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает ✅")
+async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
 
+    cur.execute("SELECT chat_id, title, active FROM chats ORDER BY title")
+    rows = cur.fetchall()
+
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("Чатов пока нет.")
+        return
+
+    text = "Сохраненные чаты:\n\n"
+
+    for chat_id, title, active in rows:
+        status_icon = "✅" if active == 1 else "⛔"
+        text += f"{status_icon} {title}\nID: {chat_id}\n\n"
+
+    await update.message.reply_text(text)
+
+
+async def manual_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await broadcast(context.application)
+    await update.message.reply_text("Рассылка отправлена ✅")
 
 async def broadcast(app: Application):
     conn = sqlite3.connect(DB_NAME)
@@ -225,6 +249,8 @@ def main():
     app.add_handler(CommandHandler("kurs", kurs))
     app.add_handler(CommandHandler("addrate", add_rate))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("chats", chats))
+    app.add_handler(CommandHandler("broadcast", manual_broadcast))
     app.add_handler(MessageHandler(filters.TEXT, text_commands))
 
     print("Бот запускается...")
