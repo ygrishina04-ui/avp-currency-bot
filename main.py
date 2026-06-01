@@ -191,13 +191,13 @@ async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await manual_broadcast(update, context)
 
     elif text in ["➕ внести курс", "внести курс"]:
-    waiting_for_rate.add(update.effective_chat.id)
+        waiting_for_rate.add(update.effective_chat.id)
 
-    await update.message.reply_text(
-        "Введите курс USDT/RUB\n\n"
-        "Например:\n"
-        "75.340"
-    )
+        await update.message.reply_text(
+            "Введите курс USDT/RUB\n\n"
+            "Например:\n"
+            "75.340"
+        )
     async def handle_rate_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
