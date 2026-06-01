@@ -82,8 +82,9 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def save_rate(usdt_rub, usd_jpy_xe):
-    usd_jpy_work = usd_jpy_xe * 0.99
+def save_rate(usdt_rub):
+    usd_jpy_source = get_usd_jpy_rate()
+    usd_jpy_work = usd_jpy_source * 0.99
     jpy_rub = usdt_rub / usd_jpy_work
 
     now = datetime.now(ZoneInfo(TIMEZONE))
@@ -104,7 +105,7 @@ def save_rate(usdt_rub, usd_jpy_xe):
     """, (
         now.strftime("%d.%m.%Y"),
         usdt_rub,
-        usd_jpy_xe,
+        usd_jpy_source,
         usd_jpy_work,
         jpy_rub,
         now.isoformat()
