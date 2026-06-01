@@ -136,7 +136,7 @@ def build_message():
     return (
         f"Курсы на сегодня {date[:5]}\n\n"
         f"USDT/RUB — {usdt_rub:.3f}\n"
-        f"USD/JPY XE -1% — {usd_jpy_work:.2f}\n"
+        f"USD/JPY XE — {usd_jpy_work:.2f}\n"
         f"JPY/RUB расчётный — {jpy_rub:.4f}"
     )
 
