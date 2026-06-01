@@ -1,3 +1,5 @@
+import threading
+from flask import Flask
 import os
 import sqlite3
 import asyncio
@@ -11,7 +13,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 
 DB_NAME = "rates.db"
+web_app = Flask(__name__)
 
+@web_app.route("/")
+def home():
+    return "AVP Currency Bot is running ✅"
+
+def run_web():
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -218,7 +228,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT, text_commands))
 
     print("Бот запускается...")
-
+    threading.Thread(target=run_web, daemon=True).start()
     app.run_polling(close_loop=False)
 
 
