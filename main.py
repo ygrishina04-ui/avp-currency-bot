@@ -133,12 +133,12 @@ def build_message():
 
     date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub = rate
 
-    return (
-        f"Курсы на сегодня {date[:5]}\n\n"
-        f"USDT/RUB — {usdt_rub:.3f}\n"
-        f"USD/JPY XE — {usd_jpy_work:.2f}\n"
-        f"JPY/RUB расчётный — {jpy_rub:.4f}"
-    )
+return (
+    f"📊 Курсы на сегодня {date[:5]}\n\n"
+    f"💵 USDT/RUB — {usdt_rub:.3f}\n"
+    f"💴 USD/JPY — {usd_jpy_work:.2f}\n"
+    f"🧮 JPY/RUB — {jpy_rub:.4f}"
+)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
