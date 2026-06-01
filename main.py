@@ -223,7 +223,6 @@ async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пример:\n"
             "75.340"
         )
-
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if len(context.args) < 1:
