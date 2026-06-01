@@ -254,7 +254,7 @@ async def broadcast(app: Application):
             await app.bot.send_message(chat_id=chat[0], text=message)
         except Exception as e:
             print(f"Ошибка отправки в {chat[0]}: {e}")
-            def auto_broadcast_loop(app: Application):
+  def auto_broadcast_loop(app: Application):
     last_sent_date = None
 
     while True:
@@ -267,15 +267,13 @@ async def broadcast(app: Application):
                 print("Запускаю автоматическую рассылку курсов...")
 
                 try:
-                    asyncio.run(broadcast(app))
+                    app.create_task(broadcast(app))
                     last_sent_date = today
-                    print("Автоматическая рассылка выполнена ✅")
+                    print("Автоматическая рассылка поставлена в очередь ✅")
                 except Exception as e:
                     print(f"Ошибка автоматической рассылки: {e}")
 
         time.sleep(30)
-
-
 def main():
     init_db()
 
