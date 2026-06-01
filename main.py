@@ -6,13 +6,21 @@ import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 
 DB_NAME = "rates.db"
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["📊 Курс", "➕ Внести курс"],
+        ["📣 Рассылка", "💬 Чаты"],
+        ["✅ Статус"]
+    ],
+    resize_keyboard=True
+)
 web_app = Flask(__name__)
 
 @web_app.route("/")
@@ -141,13 +149,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat.title or chat.first_name or "Личный чат"
     )
 
-    await update.message.reply_text(
-        "Бот запущен ✅\n\n"
-        "Команды:\n"
-        "/kurs — показать курс\n"
-        "/addrate 76.340 159.42 — внести курс вручную\n"
-        "/status — статус бота"
-    )
+await update.message.reply_text(
+    "Бот запущен ✅\n\nВыбери действие в меню ниже:",
+    reply_markup=MENU_KEYBOARD
+)
 
 
 async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,8 +168,26 @@ async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
 
-    if text == "/курс":
+    if text in ["/курс", "📊 курс", "курс"]:
         await kurs(update, context)
+
+    elif text in ["✅ статус", "статус"]:
+        await status(update, context)
+
+    elif text in ["💬 чаты", "чаты"]:
+        await chats(update, context)
+
+    elif text in ["📣 рассылка", "рассылка"]:
+        await manual_broadcast(update, context)
+
+    elif text in ["➕ внести курс", "внести курс"]:
+        await update.message.reply_text(
+            "Отправь курс в формате:\n\n"
+            "/addrate 76.340 159.42\n\n"
+            "где:\n"
+            "76.340 — USDT/RUB\n"
+            "159.42 — USD/JPY XE"
+        )
 
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
