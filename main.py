@@ -15,6 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 
 DB_NAME = "rates.db"
+waiting_for_rate = set()
 MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["📊 Курс", "➕ Внести курс"],
@@ -190,11 +191,38 @@ async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await manual_broadcast(update, context)
 
     elif text in ["➕ внести курс", "внести курс"]:
+    waiting_for_rate.add(update.effective_chat.id)
+
+    await update.message.reply_text(
+        "Введите курс USDT/RUB\n\n"
+        "Например:\n"
+        "75.340"
+    )
+    async def handle_rate_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if chat_id not in waiting_for_rate:
+        return
+
+    try:
+        usdt_rub = float(
+            update.message.text.replace(",", ".")
+        )
+
+        save_rate(usdt_rub)
+
+        waiting_for_rate.remove(chat_id)
+
         await update.message.reply_text(
-    "Отправь курс USDT/RUB в формате:\n\n"
-    "/addrate 76.340\n\n"
-    "USD/JPY бот заберет автоматически и посчитает минус 1%."
-)
+            "Курс сохранен ✅\n\n" + build_message()
+        )
+
+    except Exception:
+        await update.message.reply_text(
+            "Не удалось распознать курс.\n\n"
+            "Пример:\n"
+            "75.340"
+        )
 
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -302,6 +330,7 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("chats", chats))
     app.add_handler(CommandHandler("broadcast", manual_broadcast))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_rate_input))
     app.add_handler(MessageHandler(filters.TEXT, text_commands))
 
     print("Бот запускается...")
