@@ -174,14 +174,14 @@ def main():
     app.add_handler(CommandHandler("addrate", add_rate))
     app.add_handler(CommandHandler("status", status))
 
-    scheduler = BackgroundScheduler(timezone=TIMEZONE)
-    scheduler.add_job(
-        lambda: app.create_task(broadcast(app)),
-        "cron",
-        hour=10,
-        minute=0
-    )
-    scheduler.start()
+    #scheduler = BackgroundScheduler(timezone=TIMEZONE)
+    #scheduler.add_job(
+    #    lambda: app.create_task(broadcast(app)),
+    #   "cron",
+    #    hour=10,
+    #    minute=0
+   # )
+   # scheduler.start()
 
     app.run_polling()
 
