@@ -9,13 +9,50 @@ from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, request
 
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 DB_NAME = "rates.db"
 
-waiting_for_rate = set()
+ADMIN_USER_IDS = {
+    int(x.strip())
+    for x in os.getenv("ADMIN_USER_IDS", "").split(",")
+    if x.strip()
+}
 
+waiting_for_rate = set()
 web_app = Flask(__name__)
+
+
+def is_private_chat(chat):
+    return chat.get("type") == "private"
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_USER_IDS
+
+
+def get_keyboard(chat, user_id):
+    if not is_private_chat(chat):
+        return {
+            "keyboard": [["📊 Курс"]],
+            "resize_keyboard": True
+        }
+
+    if is_admin(user_id):
+        return {
+            "keyboard": [
+                ["📊 Курс", "➕ Внести курс"],
+                ["📣 Рассылка", "💬 Чаты"],
+                ["✅ Статус"]
+            ],
+            "resize_keyboard": True
+        }
+
+    return {
+        "keyboard": [["📊 Курс"]],
+        "resize_keyboard": True
+    }
 
 
 def telegram_api(method, payload=None):
@@ -25,21 +62,14 @@ def telegram_api(method, payload=None):
     return response.json()
 
 
-def send_message(chat_id, text, keyboard=True):
+def send_message(chat_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
         "text": text
     }
 
-    if keyboard:
-        payload["reply_markup"] = {
-            "keyboard": [
-                ["📊 Курс", "➕ Внести курс"],
-                ["📣 Рассылка", "💬 Чаты"],
-                ["✅ Статус"]
-            ],
-            "resize_keyboard": True
-        }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     telegram_api("sendMessage", payload)
 
@@ -149,7 +179,7 @@ def build_message():
     if not rate:
         return (
             "Курсы еще не внесены.\n\n"
-            "Нажми «➕ Внести курс» и отправь USDT/RUB."
+            "Администратор может внести курс через личный чат с ботом."
         )
 
     date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub = rate
@@ -160,6 +190,27 @@ def build_message():
         f"💴 USD/JPY — {usd_jpy_work:.2f}\n"
         f"🧮 JPY/RUB — {jpy_rub:.4f}"
     )
+
+
+def get_chats_message():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute("SELECT chat_id, title, active FROM chats ORDER BY title")
+    rows = cur.fetchall()
+
+    conn.close()
+
+    if not rows:
+        return "Чатов пока нет."
+
+    text = "Сохраненные чаты:\n\n"
+
+    for chat_id, title, active in rows:
+        status_icon = "✅" if active == 1 else "⛔"
+        text += f"{status_icon} {title}\nID: {chat_id}\n\n"
+
+    return text
 
 
 def broadcast():
@@ -198,35 +249,18 @@ def auto_broadcast_loop():
         time.sleep(30)
 
 
-def get_chats_message():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    cur.execute("SELECT chat_id, title, active FROM chats ORDER BY title")
-    rows = cur.fetchall()
-
-    conn.close()
-
-    if not rows:
-        return "Чатов пока нет."
-
-    text = "Сохраненные чаты:\n\n"
-
-    for chat_id, title, active in rows:
-        status_icon = "✅" if active == 1 else "⛔"
-        text += f"{status_icon} {title}\nID: {chat_id}\n\n"
-
-    return text
-
-
 def handle_message(data):
     message = data.get("message")
     if not message:
         return
 
     chat = message.get("chat", {})
+    user = message.get("from", {})
+
     chat_id = chat.get("id")
+    user_id = user.get("id")
     text = message.get("text", "").strip()
+    text_lower = text.lower()
 
     title = (
         chat.get("title")
@@ -237,9 +271,21 @@ def handle_message(data):
 
     save_chat(chat_id, title)
 
-    text_lower = text.lower()
+    private_chat = is_private_chat(chat)
+    admin = is_admin(user_id)
+    reply_markup = get_keyboard(chat, user_id)
 
+    # Ожидание ввода курса доступно только админу в личном чате
     if chat_id in waiting_for_rate:
+        if not private_chat or not admin:
+            waiting_for_rate.discard(chat_id)
+            send_message(
+                chat_id,
+                "Внесение курса доступно только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
+
         try:
             number_match = re.search(r"\d+[.,]?\d*", text)
             if not number_match:
@@ -248,11 +294,12 @@ def handle_message(data):
             usdt_rub = float(number_match.group(0).replace(",", "."))
             save_rate(usdt_rub)
 
-            waiting_for_rate.remove(chat_id)
+            waiting_for_rate.discard(chat_id)
 
             send_message(
                 chat_id,
-                "Курс сохранен ✅\n\n" + build_message()
+                "Курс сохранен ✅\n\n" + build_message(),
+                reply_markup
             )
 
         except Exception:
@@ -260,30 +307,61 @@ def handle_message(data):
                 chat_id,
                 "Не удалось распознать курс.\n\n"
                 "Пример:\n"
-                "75.340"
+                "75.340",
+                reply_markup
             )
 
         return
 
+    # Старт
     if text_lower in ["/start", "старт"]:
-        send_message(
-            chat_id,
-            "Бот запущен ✅\n\nВыбери действие в меню ниже:"
-        )
+        if private_chat and admin:
+            send_message(
+                chat_id,
+                "Бот запущен ✅\n\nВыбери действие в меню ниже:",
+                reply_markup
+            )
+        else:
+            send_message(
+                chat_id,
+                "Бот запущен ✅\n\nВ группе доступна команда /курс",
+                reply_markup
+            )
 
+    # Курс доступен всем
     elif text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
-        send_message(chat_id, build_message())
+        send_message(chat_id, build_message(), reply_markup)
 
+    # Внести курс — только админ в личке
     elif text_lower in ["➕ внести курс", "внести курс"]:
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Эта команда доступна только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
+
         waiting_for_rate.add(chat_id)
+
         send_message(
             chat_id,
             "Введите курс USDT/RUB\n\n"
             "Например:\n"
-            "75.340"
+            "75.340",
+            reply_markup
         )
 
+    # Ручной ввод через команду — только админ в личке
     elif text_lower.startswith("/addrate"):
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Эта команда доступна только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
+
         try:
             parts = text.split()
             usdt_rub = float(parts[1].replace(",", "."))
@@ -291,7 +369,8 @@ def handle_message(data):
 
             send_message(
                 chat_id,
-                "Курс сохранен ✅\n\n" + build_message()
+                "Курс сохранен ✅\n\n" + build_message(),
+                reply_markup
             )
 
         except Exception:
@@ -299,18 +378,42 @@ def handle_message(data):
                 chat_id,
                 "Неверный формат.\n\n"
                 "Используй так:\n"
-                "/addrate 75.340"
+                "/addrate 75.340",
+                reply_markup
             )
 
+    # Статус — только админ в личке
     elif text_lower in ["/status", "✅ статус", "статус"]:
-        send_message(chat_id, "Бот работает ✅")
+        if not private_chat or not admin:
+            send_message(chat_id, build_message(), reply_markup)
+            return
 
+        send_message(chat_id, "Бот работает ✅", reply_markup)
+
+    # Чаты — только админ в личке
     elif text_lower in ["/chats", "💬 чаты", "чаты"]:
-        send_message(chat_id, get_chats_message())
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Эта команда доступна только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
 
+        send_message(chat_id, get_chats_message(), reply_markup)
+
+    # Рассылка — только админ в личке
     elif text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Эта команда доступна только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
+
         broadcast()
-        send_message(chat_id, "Рассылка отправлена ✅")
+        send_message(chat_id, "Рассылка отправлена ✅", reply_markup)
 
 
 @web_app.route("/", methods=["GET"])
