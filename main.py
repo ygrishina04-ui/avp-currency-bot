@@ -1,46 +1,48 @@
-import requests
-import time
-import threading
-from flask import Flask
 import os
+import re
+import time
 import sqlite3
-import asyncio
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import requests
+from flask import Flask, request
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
-
 DB_NAME = "rates.db"
-waiting_for_rate = set()
-MENU_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        ["📊 Курс", "➕ Внести курс"],
-        ["📣 Рассылка", "💬 Чаты"],
-        ["✅ Статус"]
-    ],
-    resize_keyboard=True
-)
-def get_usd_jpy_rate():
-    url = "https://api.frankfurter.app/latest?from=USD&to=JPY"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
 
-    data = response.json()
-    return float(data["rates"]["JPY"])
-    
+waiting_for_rate = set()
+
 web_app = Flask(__name__)
 
-@web_app.route("/")
-def home():
-    return "AVP Currency Bot is running ✅"
 
-def run_web():
-    port = int(os.getenv("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+def telegram_api(method, payload=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    response = requests.post(url, json=payload or {}, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def send_message(chat_id, text, keyboard=True):
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+
+    if keyboard:
+        payload["reply_markup"] = {
+            "keyboard": [
+                ["📊 Курс", "➕ Внести курс"],
+                ["📣 Рассылка", "💬 Чаты"],
+                ["✅ Статус"]
+            ],
+            "resize_keyboard": True
+        }
+
+    telegram_api("sendMessage", payload)
+
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -51,7 +53,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT,
             usdt_rub REAL,
-            usd_jpy_xe REAL,
+            usd_jpy_source REAL,
             usd_jpy_work REAL,
             jpy_rub REAL,
             created_at TEXT
@@ -83,6 +85,15 @@ def save_chat(chat_id, title):
     conn.close()
 
 
+def get_usd_jpy_rate():
+    url = "https://api.frankfurter.app/latest?from=USD&to=JPY"
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+    return float(data["rates"]["JPY"])
+
+
 def save_rate(usdt_rub):
     usd_jpy_source = get_usd_jpy_rate()
     usd_jpy_work = usd_jpy_source * 0.99
@@ -97,7 +108,7 @@ def save_rate(usdt_rub):
         INSERT INTO rates (
             date,
             usdt_rub,
-            usd_jpy_xe,
+            usd_jpy_source,
             usd_jpy_work,
             jpy_rub,
             created_at
@@ -121,7 +132,7 @@ def get_latest_rate():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub
+        SELECT date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub
         FROM rates
         ORDER BY id DESC
         LIMIT 1
@@ -129,7 +140,6 @@ def get_latest_rate():
 
     row = cur.fetchone()
     conn.close()
-
     return row
 
 
@@ -139,11 +149,10 @@ def build_message():
     if not rate:
         return (
             "Курсы еще не внесены.\n\n"
-            "Чтобы внести курс вручную, отправь:\n"
-            "/addrate 76.340 159.42"
+            "Нажми «➕ Внести курс» и отправь USDT/RUB."
         )
 
-    date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub = rate
+    date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub = rate
 
     return (
         f"📊 Курсы на сегодня {date[:5]}\n\n"
@@ -151,130 +160,9 @@ def build_message():
         f"💴 USD/JPY — {usd_jpy_work:.2f}\n"
         f"🧮 JPY/RUB — {jpy_rub:.4f}"
     )
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-
-    save_chat(
-        chat.id,
-        chat.title or chat.first_name or "Личный чат"
-    )
-
-    await update.message.reply_text(
-        "Бот запущен ✅\n\nВыбери действие в меню ниже:",
-        reply_markup=MENU_KEYBOARD
-    )
 
 
-async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-
-    save_chat(
-        chat.id,
-        chat.title or chat.first_name or "Личный чат"
-    )
-
-    await update.message.reply_text(build_message())
-    
-async def text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().lower()
-
-    if text in ["/курс", "📊 курс", "курс"]:
-        await kurs(update, context)
-
-    elif text in ["✅ статус", "статус"]:
-        await status(update, context)
-
-    elif text in ["💬 чаты", "чаты"]:
-        await chats(update, context)
-
-    elif text in ["📣 рассылка", "рассылка"]:
-        await manual_broadcast(update, context)
-
-    elif text in ["➕ внести курс", "внести курс"]:
-        waiting_for_rate.add(update.effective_chat.id)
-
-        await update.message.reply_text(
-            "Введите курс USDT/RUB\n\n"
-            "Например:\n"
-            "75.340"
-        )
-async def handle_rate_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    if chat_id not in waiting_for_rate:
-        return
-
-    try:
-        usdt_rub = float(
-            update.message.text.replace(",", ".")
-        )
-
-        save_rate(usdt_rub)
-
-        waiting_for_rate.remove(chat_id)
-
-        await update.message.reply_text(
-            "Курс сохранен ✅\n\n" + build_message()
-        )
-
-    except Exception:
-        await update.message.reply_text(
-            "Не удалось распознать курс.\n\n"
-            "Пример:\n"
-            "75.340"
-        )
-async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if len(context.args) < 1:
-            raise ValueError("Недостаточно аргументов")
-
-        usdt_rub = float(context.args[0].replace(",", "."))
-
-        save_rate(usdt_rub)
-
-        await update.message.reply_text(
-            "Курс сохранен ✅\n\n" + build_message()
-        )
-
-    except Exception as e:
-        await update.message.reply_text(
-            "Не получилось сохранить курс.\n\n"
-            "Используй так:\n"
-            "/addrate 76.340\n\n"
-            f"Ошибка: {e}"
-        )
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает ✅")
-async def chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    cur.execute("SELECT chat_id, title, active FROM chats ORDER BY title")
-    rows = cur.fetchall()
-
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("Чатов пока нет.")
-        return
-
-    text = "Сохраненные чаты:\n\n"
-
-    for chat_id, title, active in rows:
-        status_icon = "✅" if active == 1 else "⛔"
-        text += f"{status_icon} {title}\nID: {chat_id}\n\n"
-
-    await update.message.reply_text(text)
-
-
-async def manual_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await broadcast(context.application)
-    await update.message.reply_text("Рассылка отправлена ✅")
-
-
-async def broadcast(app: Application):
+def broadcast():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
@@ -287,12 +175,12 @@ async def broadcast(app: Application):
 
     for chat in chats:
         try:
-            await app.bot.send_message(chat_id=chat[0], text=message)
+            send_message(chat[0], message)
         except Exception as e:
             print(f"Ошибка отправки в {chat[0]}: {e}")
 
 
-def auto_broadcast_loop(app: Application):
+def auto_broadcast_loop():
     last_sent_date = None
 
     while True:
@@ -303,45 +191,159 @@ def auto_broadcast_loop(app: Application):
 
             if last_sent_date != today:
                 print("Запускаю автоматическую рассылку курсов...")
-
-                try:
-                    app.create_task(broadcast(app))
-                    last_sent_date = today
-                    print("Автоматическая рассылка поставлена в очередь ✅")
-                except Exception as e:
-                    print(f"Ошибка автоматической рассылки: {e}")
+                broadcast()
+                last_sent_date = today
+                print("Автоматическая рассылка выполнена ✅")
 
         time.sleep(30)
-def main():
-    init_db()
 
+
+def get_chats_message():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute("SELECT chat_id, title, active FROM chats ORDER BY title")
+    rows = cur.fetchall()
+
+    conn.close()
+
+    if not rows:
+        return "Чатов пока нет."
+
+    text = "Сохраненные чаты:\n\n"
+
+    for chat_id, title, active in rows:
+        status_icon = "✅" if active == 1 else "⛔"
+        text += f"{status_icon} {title}\nID: {chat_id}\n\n"
+
+    return text
+
+
+def handle_message(data):
+    message = data.get("message")
+    if not message:
+        return
+
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    text = message.get("text", "").strip()
+
+    title = (
+        chat.get("title")
+        or chat.get("first_name")
+        or chat.get("username")
+        or "Личный чат"
+    )
+
+    save_chat(chat_id, title)
+
+    text_lower = text.lower()
+
+    if chat_id in waiting_for_rate:
+        try:
+            number_match = re.search(r"\d+[.,]?\d*", text)
+            if not number_match:
+                raise ValueError("курс не найден")
+
+            usdt_rub = float(number_match.group(0).replace(",", "."))
+            save_rate(usdt_rub)
+
+            waiting_for_rate.remove(chat_id)
+
+            send_message(
+                chat_id,
+                "Курс сохранен ✅\n\n" + build_message()
+            )
+
+        except Exception:
+            send_message(
+                chat_id,
+                "Не удалось распознать курс.\n\n"
+                "Пример:\n"
+                "75.340"
+            )
+
+        return
+
+    if text_lower in ["/start", "старт"]:
+        send_message(
+            chat_id,
+            "Бот запущен ✅\n\nВыбери действие в меню ниже:"
+        )
+
+    elif text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
+        send_message(chat_id, build_message())
+
+    elif text_lower in ["➕ внести курс", "внести курс"]:
+        waiting_for_rate.add(chat_id)
+        send_message(
+            chat_id,
+            "Введите курс USDT/RUB\n\n"
+            "Например:\n"
+            "75.340"
+        )
+
+    elif text_lower.startswith("/addrate"):
+        try:
+            parts = text.split()
+            usdt_rub = float(parts[1].replace(",", "."))
+            save_rate(usdt_rub)
+
+            send_message(
+                chat_id,
+                "Курс сохранен ✅\n\n" + build_message()
+            )
+
+        except Exception:
+            send_message(
+                chat_id,
+                "Неверный формат.\n\n"
+                "Используй так:\n"
+                "/addrate 75.340"
+            )
+
+    elif text_lower in ["/status", "✅ статус", "статус"]:
+        send_message(chat_id, "Бот работает ✅")
+
+    elif text_lower in ["/chats", "💬 чаты", "чаты"]:
+        send_message(chat_id, get_chats_message())
+
+    elif text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
+        broadcast()
+        send_message(chat_id, "Рассылка отправлена ✅")
+
+
+@web_app.route("/", methods=["GET"])
+def home():
+    return "AVP Currency Bot is running ✅"
+
+
+@web_app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json(force=True)
+    handle_message(data)
+    return "ok"
+
+
+def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("kurs", kurs))
-    app.add_handler(CommandHandler("addrate", add_rate))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("chats", chats))
-    app.add_handler(CommandHandler("broadcast", manual_broadcast))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_rate_input))
-    app.add_handler(MessageHandler(filters.TEXT, text_commands))
-
-    print("Бот запускается...")
-    threading.Thread(target=run_web, daemon=True).start()
+    init_db()
 
     threading.Thread(
-    target=auto_broadcast_loop,
-    args=(app,),
-    daemon=True
+        target=auto_broadcast_loop,
+        daemon=True
     ).start()
 
-    app.run_polling(close_loop=False)
+    port = int(os.getenv("PORT", 10000))
+
+    print("Бот запускается...")
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 if __name__ == "__main__":
