@@ -1,14 +1,13 @@
 import os
 import sqlite3
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-#from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 
 DB_NAME = "rates.db"
@@ -45,10 +44,12 @@ def init_db():
 def save_chat(chat_id, title):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+
     cur.execute(
         "INSERT OR IGNORE INTO chats (chat_id, title, active) VALUES (?, ?, 1)",
         (str(chat_id), title)
     )
+
     conn.commit()
     conn.close()
 
@@ -61,8 +62,16 @@ def save_rate(usdt_rub, usd_jpy_xe):
 
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+
     cur.execute("""
-        INSERT INTO rates (date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub, created_at)
+        INSERT INTO rates (
+            date,
+            usdt_rub,
+            usd_jpy_xe,
+            usd_jpy_work,
+            jpy_rub,
+            created_at
+        )
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         now.strftime("%d.%m.%Y"),
@@ -72,6 +81,7 @@ def save_rate(usdt_rub, usd_jpy_xe):
         jpy_rub,
         now.isoformat()
     ))
+
     conn.commit()
     conn.close()
 
@@ -79,14 +89,17 @@ def save_rate(usdt_rub, usd_jpy_xe):
 def get_latest_rate():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+
     cur.execute("""
         SELECT date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub
         FROM rates
         ORDER BY id DESC
         LIMIT 1
     """)
+
     row = cur.fetchone()
     conn.close()
+
     return row
 
 
@@ -94,7 +107,11 @@ def build_message():
     rate = get_latest_rate()
 
     if not rate:
-        return "Курсы еще не внесены. Используй команду:\n\n/addrate 76.340 159.42"
+        return (
+            "Курсы еще не внесены.\n\n"
+            "Чтобы внести курс вручную, отправь:\n"
+            "/addrate 76.340 159.42"
+        )
 
     date, usdt_rub, usd_jpy_xe, usd_jpy_work, jpy_rub = rate
 
@@ -108,35 +125,50 @@ def build_message():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    save_chat(chat.id, chat.title or chat.first_name or "Личный чат")
+
+    save_chat(
+        chat.id,
+        chat.title or chat.first_name or "Личный чат"
+    )
 
     await update.message.reply_text(
-        "Бот запущен. Команды:\n\n"
-        "/курс — показать курс\n"
+        "Бот запущен ✅\n\n"
+        "Команды:\n"
+        "/kurs — показать курс\n"
         "/addrate 76.340 159.42 — внести курс вручную\n"
-        "/status — статус"
+        "/status — статус бота"
     )
 
 
 async def kurs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    save_chat(chat.id, chat.title or chat.first_name or "Личный чат")
+
+    save_chat(
+        chat.id,
+        chat.title or chat.first_name or "Личный чат"
+    )
 
     await update.message.reply_text(build_message())
 
 
 async def add_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        if len(context.args) < 2:
+            raise ValueError("Недостаточно аргументов")
+
         usdt_rub = float(context.args[0].replace(",", "."))
         usd_jpy_xe = float(context.args[1].replace(",", "."))
 
         save_rate(usdt_rub, usd_jpy_xe)
 
-        await update.message.reply_text("Курс сохранен ✅\n\n" + build_message())
+        await update.message.reply_text(
+            "Курс сохранен ✅\n\n" + build_message()
+        )
 
     except Exception:
         await update.message.reply_text(
-            "Неверный формат. Используй так:\n\n"
+            "Неверный формат.\n\n"
+            "Используй так:\n"
             "/addrate 76.340 159.42"
         )
 
@@ -148,8 +180,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast(app: Application):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+
     cur.execute("SELECT chat_id FROM chats WHERE active = 1")
     chats = cur.fetchall()
+
     conn.close()
 
     message = build_message()
@@ -167,6 +201,9 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан")
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -174,14 +211,7 @@ def main():
     app.add_handler(CommandHandler("addrate", add_rate))
     app.add_handler(CommandHandler("status", status))
 
-    #scheduler = BackgroundScheduler(timezone=TIMEZONE)
-    #scheduler.add_job(
-    #    lambda: app.create_task(broadcast(app)),
-    #   "cron",
-    #    hour=10,
-    #    minute=0
-   # )
-   # scheduler.start()
+    print("Бот запускается...")
 
     app.run_polling(close_loop=False)
 
