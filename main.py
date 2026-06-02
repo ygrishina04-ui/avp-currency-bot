@@ -116,12 +116,35 @@ def save_chat(chat_id, title):
 
 
 def get_usd_jpy_rate():
-    url = "https://api.frankfurter.app/latest?from=USD&to=JPY"
-    response = requests.get(url, timeout=10)
+    url = "https://scanner.tradingview.com/forex/scan"
+
+    payload = {
+        "symbols": {
+            "tickers": ["FX_IDC:USDJPY"],
+            "query": {
+                "types": []
+            }
+        },
+        "columns": ["close"]
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        timeout=10
+    )
+
     response.raise_for_status()
 
     data = response.json()
-    return float(data["rates"]["JPY"])
+
+    return float(data["data"][0]["d"][0])
 
 
 def save_rate(usdt_rub):
