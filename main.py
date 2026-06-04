@@ -3,6 +3,7 @@ import re
 import time
 import sqlite3
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,8 @@ ADMIN_USER_IDS = {
     for x in os.getenv("ADMIN_USER_IDS", "").split(",")
     if x.strip()
 }
+
+TTB_CHAT_ID = os.getenv("TTB_CHAT_ID")
 
 waiting_for_rate = set()
 web_app = Flask(__name__)
@@ -115,42 +118,29 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def get_usd_jpy_rate():
-    url = "https://scanner.tradingview.com/forex/scan"
+def get_cbr_usd_rub():
+    url = "https://www.cbr.ru/scripts/XML_daily.asp"
 
-    payload = {
-        "symbols": {
-            "tickers": ["FX_IDC:USDJPY"],
-            "query": {
-                "types": []
-            }
-        },
-        "columns": ["close"]
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=10
-    )
-
+    response = requests.get(url, timeout=10)
     response.raise_for_status()
 
-    data = response.json()
+    root = ET.fromstring(response.content)
 
-    return float(data["data"][0]["d"][0])
+    for valute in root.findall("Valute"):
+        char_code = valute.find("CharCode").text
+
+        if char_code == "USD":
+            value = valute.find("Value").text.replace(",", ".")
+            return float(value)
+
+    raise ValueError("USD не найден в курсах ЦБ РФ")
 
 
-def save_rate(usdt_rub):
-    usd_jpy_source = get_usd_jpy_rate()
-    usd_jpy_work = usd_jpy_source * 0.99
-    jpy_rub = usdt_rub / usd_jpy_work
+def save_rate(usd_jpy):
+    cbr_usd_rub = get_cbr_usd_rub()
+    usdt_rub = cbr_usd_rub * 1.032
+
+    jpy_rub = (usdt_rub / usd_jpy) + 0.02
 
     now = datetime.now(ZoneInfo(TIMEZONE))
 
@@ -170,8 +160,8 @@ def save_rate(usdt_rub):
     """, (
         now.strftime("%d.%m.%Y"),
         usdt_rub,
-        usd_jpy_source,
-        usd_jpy_work,
+        usd_jpy,
+        usd_jpy,
         jpy_rub,
         now.isoformat()
     ))
@@ -196,13 +186,25 @@ def get_latest_rate():
     return row
 
 
+def has_today_rate():
+    rate = get_latest_rate()
+
+    if not rate:
+        return False
+
+    rate_date = rate[0]
+    today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d.%m.%Y")
+
+    return rate_date == today
+
+
 def build_message():
     rate = get_latest_rate()
 
     if not rate:
         return (
             "Курсы еще не внесены.\n\n"
-            "Администратор может внести курс через личный чат с ботом."
+            "Ожидаю курс USD/JPY из группы ТТБ."
         )
 
     date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub = rate
@@ -260,16 +262,30 @@ def auto_broadcast_loop():
     while True:
         now = datetime.now(ZoneInfo(TIMEZONE))
 
-        if now.hour == 11 and now.minute == 0:
+        if now.hour == 12 and now.minute == 30:
             today = now.strftime("%Y-%m-%d")
 
             if last_sent_date != today:
-                print("Запускаю автоматическую рассылку курсов...")
-                broadcast()
-                last_sent_date = today
-                print("Автоматическая рассылка выполнена ✅")
+                print("Проверяю курс перед автоматической рассылкой...")
+
+                if has_today_rate():
+                    print("Курс за сегодня найден. Запускаю рассылку...")
+                    broadcast()
+                    last_sent_date = today
+                    print("Автоматическая рассылка выполнена ✅")
+                else:
+                    print("Курс за сегодня не найден. Рассылка пропущена.")
 
         time.sleep(30)
+
+
+def extract_rate_from_text(text):
+    match = re.search(r"\d+[.,]?\d*", text)
+
+    if not match:
+        return None
+
+    return float(match.group(0).replace(",", "."))
 
 
 def handle_message(data):
@@ -298,7 +314,25 @@ def handle_message(data):
     admin = is_admin(user_id)
     reply_markup = get_keyboard(chat, user_id)
 
-    # Ожидание ввода курса доступно только админу в личном чате
+    if text_lower == "/chatid":
+        send_message(
+            chat_id,
+            f"Chat ID: {chat_id}",
+            reply_markup
+        )
+        return
+
+    # Автозабор USD/JPY из группы ТТБ.
+    # В группе должен писать человек, не бот.
+    if TTB_CHAT_ID and str(chat_id) == str(TTB_CHAT_ID):
+        usd_jpy = extract_rate_from_text(text)
+
+        if usd_jpy:
+            save_rate(usd_jpy)
+            print(f"Курс из группы ТТБ сохранен: USD/JPY = {usd_jpy}")
+
+        return
+
     if chat_id in waiting_for_rate:
         if not private_chat or not admin:
             waiting_for_rate.discard(chat_id)
@@ -310,13 +344,12 @@ def handle_message(data):
             return
 
         try:
-            number_match = re.search(r"\d+[.,]?\d*", text)
-            if not number_match:
+            usd_jpy = extract_rate_from_text(text)
+
+            if not usd_jpy:
                 raise ValueError("курс не найден")
 
-            usdt_rub = float(number_match.group(0).replace(",", "."))
-            save_rate(usdt_rub)
-
+            save_rate(usd_jpy)
             waiting_for_rate.discard(chat_id)
 
             send_message(
@@ -330,13 +363,12 @@ def handle_message(data):
                 chat_id,
                 "Не удалось распознать курс.\n\n"
                 "Пример:\n"
-                "75.340",
+                "157.83",
                 reply_markup
             )
 
         return
 
-    # Старт
     if text_lower in ["/start", "старт"]:
         if private_chat and admin:
             send_message(
@@ -351,11 +383,9 @@ def handle_message(data):
                 reply_markup
             )
 
-    # Курс доступен всем
     elif text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
         send_message(chat_id, build_message(), reply_markup)
 
-    # Внести курс — только админ в личке
     elif text_lower in ["➕ внести курс", "внести курс"]:
         if not private_chat or not admin:
             send_message(
@@ -369,13 +399,12 @@ def handle_message(data):
 
         send_message(
             chat_id,
-            "Введите курс USDT/RUB\n\n"
+            "Введите курс USD/JPY\n\n"
             "Например:\n"
-            "75.340",
+            "157.83",
             reply_markup
         )
 
-    # Ручной ввод через команду — только админ в личке
     elif text_lower.startswith("/addrate"):
         if not private_chat or not admin:
             send_message(
@@ -387,8 +416,8 @@ def handle_message(data):
 
         try:
             parts = text.split()
-            usdt_rub = float(parts[1].replace(",", "."))
-            save_rate(usdt_rub)
+            usd_jpy = float(parts[1].replace(",", "."))
+            save_rate(usd_jpy)
 
             send_message(
                 chat_id,
@@ -401,11 +430,10 @@ def handle_message(data):
                 chat_id,
                 "Неверный формат.\n\n"
                 "Используй так:\n"
-                "/addrate 75.340",
+                "/addrate 157.83",
                 reply_markup
             )
 
-    # Статус — только админ в личке
     elif text_lower in ["/status", "✅ статус", "статус"]:
         if not private_chat or not admin:
             send_message(chat_id, build_message(), reply_markup)
@@ -413,7 +441,6 @@ def handle_message(data):
 
         send_message(chat_id, "Бот работает ✅", reply_markup)
 
-    # Чаты — только админ в личке
     elif text_lower in ["/chats", "💬 чаты", "чаты"]:
         if not private_chat or not admin:
             send_message(
@@ -425,7 +452,6 @@ def handle_message(data):
 
         send_message(chat_id, get_chats_message(), reply_markup)
 
-    # Рассылка — только админ в личке
     elif text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
         if not private_chat or not admin:
             send_message(
@@ -435,8 +461,15 @@ def handle_message(data):
             )
             return
 
-        broadcast()
-        send_message(chat_id, "Рассылка отправлена ✅", reply_markup)
+        if has_today_rate():
+            broadcast()
+            send_message(chat_id, "Рассылка отправлена ✅", reply_markup)
+        else:
+            send_message(
+                chat_id,
+                "Рассылка не отправлена: курс за сегодня еще не найден.",
+                reply_markup
+            )
 
 
 @web_app.route("/", methods=["GET"])
