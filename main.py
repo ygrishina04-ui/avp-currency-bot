@@ -280,6 +280,11 @@ def auto_broadcast_loop():
 
 
 def extract_rate_from_text(text):
+    text = text.lower().strip()
+
+    if not text.startswith("курс"):
+        return None
+
     match = re.search(r"\d+[.,]?\d*", text)
 
     if not match:
