@@ -1,3 +1,4 @@
+AUTO_BROADCAST = False
 import os
 import re
 import time
@@ -262,7 +263,7 @@ def auto_broadcast_loop():
     while True:
         now = datetime.now(ZoneInfo(TIMEZONE))
 
-        if now.hour == 12 and now.minute == 30:
+        if False and now.hour == 12 and now.minute == 30:
             today = now.strftime("%Y-%m-%d")
 
             if last_sent_date != today:
