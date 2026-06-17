@@ -298,7 +298,20 @@ def build_message():
         f"💴 USD/JPY — {usd_jpy:.2f}\n"
         f"🧮 JPY/RUB — {jpy_rub:.3f}"
     )
+def build_pin_message():
+    rate = get_latest_rate()
 
+    if not rate:
+        return "Курсы не внесены"
+
+    date, usd_rub, usd_jpy, jpy_rub = rate
+
+    return (
+        f"📊 {date[:5]} | "
+        f"💵{usd_rub:.3f} | "
+        f"💴{usd_jpy:.2f} | "
+        f"🧮{jpy_rub:.3f}"
+    )
 
 def get_chats_message():
     conn = sqlite3.connect(DB_NAME)
@@ -349,30 +362,31 @@ def broadcast():
         print("Нет групп для рассылки.")
         return
 
-    message = build_message()
+    full_message = build_message()
+    pin_message_text = build_pin_message()
 
     for chat_id, title, mode, message_id in groups:
         try:
             if mode == "pin":
                 if message_id:
                     try:
-                        edit_message(chat_id, message_id, message)
+                        edit_message(chat_id, message_id, pin_message_text)
                         print(f"Закреп обновлен в {title} ({chat_id})")
                     except Exception as edit_error:
                         print(f"Не удалось обновить закреп, создаю новый: {edit_error}")
-                        sent = send_message(chat_id, message)
+                        sent = send_message(chat_id, pin_message_text)
                         new_message_id = sent["result"]["message_id"]
                         pin_message(chat_id, new_message_id)
                         update_group_message_id(chat_id, new_message_id)
                         print(f"Создан новый закреп в {title} ({chat_id})")
                 else:
-                    sent = send_message(chat_id, message)
+                    sent = send_message(chat_id, pin_message_text)
                     new_message_id = sent["result"]["message_id"]
                     pin_message(chat_id, new_message_id)
                     update_group_message_id(chat_id, new_message_id)
                     print(f"Создан закреп в {title} ({chat_id})")
             else:
-                send_message(chat_id, message)
+                send_message(chat_id, full_message)
                 print(f"Отправлено в {title} ({chat_id})")
 
         except Exception as e:
