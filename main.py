@@ -99,6 +99,14 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS broadcast_groups (
+            chat_id TEXT PRIMARY KEY,
+            title TEXT,
+            created_at TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -114,6 +122,52 @@ def save_chat(chat_id, title):
 
     conn.commit()
     conn.close()
+
+
+def add_broadcast_group(chat_id, title):
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO broadcast_groups (chat_id, title, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (str(chat_id), title, now)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def remove_broadcast_group(chat_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM broadcast_groups WHERE chat_id = ?",
+        (str(chat_id),)
+    )
+
+    deleted = cur.rowcount
+
+    conn.commit()
+    conn.close()
+
+    return deleted > 0
+
+
+def get_broadcast_groups():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute("SELECT chat_id, title FROM broadcast_groups ORDER BY title")
+    rows = cur.fetchall()
+
+    conn.close()
+    return rows
 
 
 def save_rate(usd_rub, jpy_rub):
@@ -217,22 +271,39 @@ def get_chats_message():
     return text
 
 
+def get_groups_message():
+    rows = get_broadcast_groups()
+
+    if not rows:
+        return (
+            "Группы рассылки пока не добавлены.\n\n"
+            "Добавь бота в нужную группу и напиши там:\n"
+            "/addgroup"
+        )
+
+    text = "📣 Группы рассылки:\n\n"
+
+    for index, (chat_id, title) in enumerate(rows, start=1):
+        text += f"{index}. {title}\nID: {chat_id}\n\n"
+
+    return text
+
+
 def broadcast():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+    groups = get_broadcast_groups()
 
-    cur.execute("SELECT chat_id FROM chats WHERE active = 1")
-    chats = cur.fetchall()
-
-    conn.close()
+    if not groups:
+        print("Нет групп для рассылки.")
+        return
 
     message = build_message()
 
-    for chat in chats:
+    for chat_id, title in groups:
         try:
-            send_message(chat[0], message)
+            send_message(chat_id, message)
+            print(f"Отправлено в {title} ({chat_id})")
         except Exception as e:
-            print(f"Ошибка отправки в {chat[0]}: {e}")
+            print(f"Ошибка отправки в {title} ({chat_id}): {e}")
 
 
 def auto_broadcast_loop():
@@ -273,14 +344,6 @@ def parse_rates_from_text(text):
         "jpy_rub": jpy_rub
     }
 
-    if not usd_rub_match or not jpy_rub_match:
-        return None
-
-    return {
-        "usd_rub": float(usd_rub_match.group(1)),
-        "jpy_rub": float(jpy_rub_match.group(1))
-    }
-
 
 def handle_message(data):
     message = data.get("message")
@@ -312,6 +375,53 @@ def handle_message(data):
         send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
         return
 
+    if text_lower == "/addgroup":
+        if private_chat:
+            send_message(chat_id, "Эту команду нужно писать в группе.", reply_markup)
+            return
+
+        if not admin:
+            send_message(chat_id, "Добавлять группы может только администратор бота.", reply_markup)
+            return
+
+        add_broadcast_group(chat_id, title)
+
+        send_message(
+            chat_id,
+            f"✅ Группа добавлена в рассылку\n\nНазвание: {title}\nID: {chat_id}",
+            reply_markup
+        )
+        return
+
+    if text_lower == "/removegroup":
+        if private_chat:
+            send_message(chat_id, "Эту команду нужно писать в группе.", reply_markup)
+            return
+
+        if not admin:
+            send_message(chat_id, "Удалять группы может только администратор бота.", reply_markup)
+            return
+
+        removed = remove_broadcast_group(chat_id)
+
+        if removed:
+            send_message(chat_id, "❌ Группа удалена из рассылки.", reply_markup)
+        else:
+            send_message(chat_id, "Этой группы не было в списке рассылки.", reply_markup)
+        return
+
+    if text_lower == "/groups":
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Эта команда доступна только администратору в личном чате с ботом.",
+                reply_markup
+            )
+            return
+
+        send_message(chat_id, get_groups_message(), reply_markup)
+        return
+
     if chat_id in waiting_for_rate:
         if not private_chat or not admin:
             waiting_for_rate.discard(chat_id)
@@ -329,9 +439,8 @@ def handle_message(data):
                 chat_id,
                 "Не удалось распознать курсы.\n\n"
                 "Пример:\n"
-                "курс\n"
-                "USD/RUB 92.50\n"
-                "JPY/RUB 58.45",
+                "76,80\n"
+                "48,30",
                 reply_markup
             )
             return
@@ -408,7 +517,7 @@ def handle_message(data):
                 chat_id,
                 "Неверный формат.\n\n"
                 "Используй так:\n"
-                "/addrate USD/RUB 92.50 JPY/RUB 58.45",
+                "/addrate 76,80 48,30",
                 reply_markup
             )
             return
