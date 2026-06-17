@@ -1,10 +1,8 @@
-AUTO_BROADCAST = False
 import os
 import re
 import time
 import sqlite3
 import threading
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,13 +14,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 DB_NAME = "rates.db"
 
+DISCOUNT_FACTOR = 0.9985  # минус 0,15%
+
 ADMIN_USER_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_USER_IDS", "").split(",")
     if x.strip()
 }
-
-TTB_CHAT_ID = os.getenv("TTB_CHAT_ID")
 
 waiting_for_rate = set()
 web_app = Flask(__name__)
@@ -87,8 +85,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT,
             usdt_rub REAL,
-            usd_jpy_source REAL,
-            usd_jpy_work REAL,
+            usd_jpy REAL,
             jpy_rub REAL,
             created_at TEXT
         )
@@ -119,29 +116,10 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def get_cbr_usd_rub():
-    url = "https://www.cbr.ru/scripts/XML_daily.asp"
-
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-
-    root = ET.fromstring(response.content)
-
-    for valute in root.findall("Valute"):
-        char_code = valute.find("CharCode").text
-
-        if char_code == "USD":
-            value = valute.find("Value").text.replace(",", ".")
-            return float(value)
-
-    raise ValueError("USD не найден в курсах ЦБ РФ")
-
-
-def save_rate(usd_jpy):
-    cbr_usd_rub = get_cbr_usd_rub()
-    usdt_rub = cbr_usd_rub * 1.032
-
-    jpy_rub = (usdt_rub / usd_jpy) + 0.02
+def save_rate(usdt_rub, usd_jpy, jpy_rub):
+    usdt_rub_final = usdt_rub * DISCOUNT_FACTOR
+    usd_jpy_final = usd_jpy * DISCOUNT_FACTOR
+    jpy_rub_final = jpy_rub * DISCOUNT_FACTOR
 
     now = datetime.now(ZoneInfo(TIMEZONE))
 
@@ -152,18 +130,16 @@ def save_rate(usd_jpy):
         INSERT INTO rates (
             date,
             usdt_rub,
-            usd_jpy_source,
-            usd_jpy_work,
+            usd_jpy,
             jpy_rub,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     """, (
         now.strftime("%d.%m.%Y"),
-        usdt_rub,
-        usd_jpy,
-        usd_jpy,
-        jpy_rub,
+        usdt_rub_final,
+        usd_jpy_final,
+        jpy_rub_final,
         now.isoformat()
     ))
 
@@ -176,7 +152,7 @@ def get_latest_rate():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub
+        SELECT date, usdt_rub, usd_jpy, jpy_rub
         FROM rates
         ORDER BY id DESC
         LIMIT 1
@@ -205,15 +181,15 @@ def build_message():
     if not rate:
         return (
             "Курсы еще не внесены.\n\n"
-            "Ожидаю курс USD/JPY из группы ТТБ."
+            "Администратор может внести 3 курса в личном чате с ботом."
         )
 
-    date, usdt_rub, usd_jpy_source, usd_jpy_work, jpy_rub = rate
+    date, usdt_rub, usd_jpy, jpy_rub = rate
 
     return (
         f"📊 Курсы на сегодня {date[:5]}\n\n"
         f"💵 USDT/RUB — {usdt_rub:.3f}\n"
-        f"💴 USD/JPY — {usd_jpy_work:.2f}\n"
+        f"💴 USD/JPY — {usd_jpy:.2f}\n"
         f"🧮 JPY/RUB — {jpy_rub:.4f}"
     )
 
@@ -263,14 +239,13 @@ def auto_broadcast_loop():
     while True:
         now = datetime.now(ZoneInfo(TIMEZONE))
 
-        if False and now.hour == 12 and now.minute == 30:
+        if now.hour == 11 and now.minute == 0:
             today = now.strftime("%Y-%m-%d")
 
             if last_sent_date != today:
                 print("Проверяю курс перед автоматической рассылкой...")
 
                 if has_today_rate():
-                    print("Курс за сегодня найден. Запускаю рассылку...")
                     broadcast()
                     last_sent_date = today
                     print("Автоматическая рассылка выполнена ✅")
@@ -280,18 +255,35 @@ def auto_broadcast_loop():
         time.sleep(30)
 
 
-def extract_rate_from_text(text):
-    text = text.lower().strip()
+def parse_rates_from_text(text):
+    clean_text = text.replace(",", ".")
 
-    if not text.startswith("курс"):
+    usdt_rub_match = re.search(
+        r"(?:USDT\s*/?\s*RUB|USDT\s*RUB)\D+(\d+(?:\.\d+)?)",
+        clean_text,
+        re.IGNORECASE
+    )
+
+    usd_jpy_match = re.search(
+        r"(?:USD\s*/?\s*JPY|USD\s*JPY)\D+(\d+(?:\.\d+)?)",
+        clean_text,
+        re.IGNORECASE
+    )
+
+    jpy_rub_match = re.search(
+        r"(?:JPY\s*/?\s*RUB|JPY\s*RUB)\D+(\d+(?:\.\d+)?)",
+        clean_text,
+        re.IGNORECASE
+    )
+
+    if not usdt_rub_match or not usd_jpy_match or not jpy_rub_match:
         return None
 
-    match = re.search(r"\d+[.,]?\d*", text)
-
-    if not match:
-        return None
-
-    return float(match.group(0).replace(",", "."))
+    return {
+        "usdt_rub": float(usdt_rub_match.group(1)),
+        "usd_jpy": float(usd_jpy_match.group(1)),
+        "jpy_rub": float(jpy_rub_match.group(1))
+    }
 
 
 def handle_message(data):
@@ -321,22 +313,7 @@ def handle_message(data):
     reply_markup = get_keyboard(chat, user_id)
 
     if text_lower == "/chatid":
-        send_message(
-            chat_id,
-            f"Chat ID: {chat_id}",
-            reply_markup
-        )
-        return
-
-    # Автозабор USD/JPY из группы ТТБ.
-    # В группе должен писать человек, не бот.
-    if TTB_CHAT_ID and str(chat_id) == str(TTB_CHAT_ID):
-        usd_jpy = extract_rate_from_text(text)
-
-        if usd_jpy:
-            save_rate(usd_jpy)
-            print(f"Курс из группы ТТБ сохранен: USD/JPY = {usd_jpy}")
-
+        send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
         return
 
     if chat_id in waiting_for_rate:
@@ -349,30 +326,36 @@ def handle_message(data):
             )
             return
 
-        try:
-            usd_jpy = extract_rate_from_text(text)
+        rates = parse_rates_from_text(text)
 
-            if not usd_jpy:
-                raise ValueError("курс не найден")
-
-            save_rate(usd_jpy)
-            waiting_for_rate.discard(chat_id)
-
+        if not rates:
             send_message(
                 chat_id,
-                "Курс сохранен ✅\n\n" + build_message(),
-                reply_markup
-            )
-
-        except Exception:
-            send_message(
-                chat_id,
-                "Не удалось распознать курс.\n\n"
+                "Не удалось распознать 3 курса.\n\n"
                 "Пример:\n"
-                "157.83",
+                "курс\n"
+                "USDT/RUB 92.50\n"
+                "USD/JPY 158.25\n"
+                "JPY/RUB 0.5845",
                 reply_markup
             )
+            return
 
+        save_rate(
+            rates["usdt_rub"],
+            rates["usd_jpy"],
+            rates["jpy_rub"]
+        )
+
+        waiting_for_rate.discard(chat_id)
+
+        send_message(
+            chat_id,
+            "Курсы сохранены ✅\n"
+            "От каждого курса отнято 0,15%.\n\n"
+            + build_message(),
+            reply_markup
+        )
         return
 
     if text_lower in ["/start", "старт"]:
@@ -405,9 +388,12 @@ def handle_message(data):
 
         send_message(
             chat_id,
-            "Введите курс USD/JPY\n\n"
-            "Например:\n"
-            "157.83",
+            "Введите 3 курса:\n\n"
+            "курс\n"
+            "USDT/RUB 92.50\n"
+            "USD/JPY 158.25\n"
+            "JPY/RUB 0.5845\n\n"
+            "Бот отнимет от каждого курса 0,15%.",
             reply_markup
         )
 
@@ -420,25 +406,31 @@ def handle_message(data):
             )
             return
 
-        try:
-            parts = text.split()
-            usd_jpy = float(parts[1].replace(",", "."))
-            save_rate(usd_jpy)
+        rates = parse_rates_from_text(text)
 
-            send_message(
-                chat_id,
-                "Курс сохранен ✅\n\n" + build_message(),
-                reply_markup
-            )
-
-        except Exception:
+        if not rates:
             send_message(
                 chat_id,
                 "Неверный формат.\n\n"
                 "Используй так:\n"
-                "/addrate 157.83",
+                "/addrate USDT/RUB 92.50 USD/JPY 158.25 JPY/RUB 0.5845",
                 reply_markup
             )
+            return
+
+        save_rate(
+            rates["usdt_rub"],
+            rates["usd_jpy"],
+            rates["jpy_rub"]
+        )
+
+        send_message(
+            chat_id,
+            "Курсы сохранены ✅\n"
+            "От каждого курса отнято 0,15%.\n\n"
+            + build_message(),
+            reply_markup
+        )
 
     elif text_lower in ["/status", "✅ статус", "статус"]:
         if not private_chat or not admin:
