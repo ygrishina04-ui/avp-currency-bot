@@ -260,17 +260,18 @@ def auto_broadcast_loop():
 def parse_rates_from_text(text):
     clean_text = text.replace(",", ".")
 
-    usd_rub_match = re.search(
-        r"(?:USD\s*/?\s*RUB|USD\s*RUB)\D+(\d+(?:\.\d+)?)",
-        clean_text,
-        re.IGNORECASE
-    )
+    numbers = re.findall(r"\d+(?:\.\d+)?", clean_text)
 
-    jpy_rub_match = re.search(
-        r"(?:JPY\s*/?\s*RUB|JPY\s*RUB)\D+(\d+(?:\.\d+)?)",
-        clean_text,
-        re.IGNORECASE
-    )
+    if len(numbers) < 2:
+        return None
+
+    usd_rub = float(numbers[0])
+    jpy_rub = float(numbers[1])
+
+    return {
+        "usd_rub": usd_rub,
+        "jpy_rub": jpy_rub
+    }
 
     if not usd_rub_match or not jpy_rub_match:
         return None
@@ -382,10 +383,11 @@ def handle_message(data):
 
         send_message(
             chat_id,
-            "Введите курсы:\n\n"
-            "курс\n"
-            "USD/RUB 92.50\n"
-            "JPY/RUB 58.45\n\n"
+            "Введите два курса:\n\n"
+            "76,80\n"
+            "48,30\n\n"
+            "1-я строка — USD/RUB\n"
+            "2-я строка — JPY/RUB\n\n"
             "Бот рассчитает USD/JPY автоматически и отнимет от всех курсов 0,15%.",
             reply_markup
         )
