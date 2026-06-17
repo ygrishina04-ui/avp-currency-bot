@@ -84,7 +84,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS rates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT,
-            usdt_rub REAL,
+            usd_rub REAL,
             usd_jpy REAL,
             jpy_rub REAL,
             created_at TEXT
@@ -116,8 +116,10 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def save_rate(usdt_rub, usd_jpy, jpy_rub):
-    usdt_rub_final = usdt_rub * DISCOUNT_FACTOR
+def save_rate(usd_rub, jpy_rub):
+    usd_jpy = (usd_rub / jpy_rub) * 100
+
+    usd_rub_final = usd_rub * DISCOUNT_FACTOR
     usd_jpy_final = usd_jpy * DISCOUNT_FACTOR
     jpy_rub_final = jpy_rub * DISCOUNT_FACTOR
 
@@ -129,7 +131,7 @@ def save_rate(usdt_rub, usd_jpy, jpy_rub):
     cur.execute("""
         INSERT INTO rates (
             date,
-            usdt_rub,
+            usd_rub,
             usd_jpy,
             jpy_rub,
             created_at
@@ -137,7 +139,7 @@ def save_rate(usdt_rub, usd_jpy, jpy_rub):
         VALUES (?, ?, ?, ?, ?)
     """, (
         now.strftime("%d.%m.%Y"),
-        usdt_rub_final,
+        usd_rub_final,
         usd_jpy_final,
         jpy_rub_final,
         now.isoformat()
@@ -152,7 +154,7 @@ def get_latest_rate():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT date, usdt_rub, usd_jpy, jpy_rub
+        SELECT date, usd_rub, usd_jpy, jpy_rub
         FROM rates
         ORDER BY id DESC
         LIMIT 1
@@ -181,16 +183,16 @@ def build_message():
     if not rate:
         return (
             "Курсы еще не внесены.\n\n"
-            "Администратор может внести 3 курса в личном чате с ботом."
+            "Администратор может внести курсы в личном чате с ботом."
         )
 
-    date, usdt_rub, usd_jpy, jpy_rub = rate
+    date, usd_rub, usd_jpy, jpy_rub = rate
 
     return (
         f"📊 Курсы на сегодня {date[:5]}\n\n"
-        f"💵 USDT/RUB — {usdt_rub:.3f}\n"
+        f"💵 USD/RUB — {usd_rub:.3f}\n"
         f"💴 USD/JPY — {usd_jpy:.2f}\n"
-        f"🧮 JPY/RUB — {jpy_rub:.4f}"
+        f"🧮 JPY/RUB — {jpy_rub:.3f}"
     )
 
 
@@ -258,14 +260,8 @@ def auto_broadcast_loop():
 def parse_rates_from_text(text):
     clean_text = text.replace(",", ".")
 
-    usdt_rub_match = re.search(
-        r"(?:USDT\s*/?\s*RUB|USDT\s*RUB)\D+(\d+(?:\.\d+)?)",
-        clean_text,
-        re.IGNORECASE
-    )
-
-    usd_jpy_match = re.search(
-        r"(?:USD\s*/?\s*JPY|USD\s*JPY)\D+(\d+(?:\.\d+)?)",
+    usd_rub_match = re.search(
+        r"(?:USD\s*/?\s*RUB|USD\s*RUB)\D+(\d+(?:\.\d+)?)",
         clean_text,
         re.IGNORECASE
     )
@@ -276,12 +272,11 @@ def parse_rates_from_text(text):
         re.IGNORECASE
     )
 
-    if not usdt_rub_match or not usd_jpy_match or not jpy_rub_match:
+    if not usd_rub_match or not jpy_rub_match:
         return None
 
     return {
-        "usdt_rub": float(usdt_rub_match.group(1)),
-        "usd_jpy": float(usd_jpy_match.group(1)),
+        "usd_rub": float(usd_rub_match.group(1)),
         "jpy_rub": float(jpy_rub_match.group(1))
     }
 
@@ -331,19 +326,17 @@ def handle_message(data):
         if not rates:
             send_message(
                 chat_id,
-                "Не удалось распознать 3 курса.\n\n"
+                "Не удалось распознать курсы.\n\n"
                 "Пример:\n"
                 "курс\n"
-                "USDT/RUB 92.50\n"
-                "USD/JPY 158.25\n"
-                "JPY/RUB 0.5845",
+                "USD/RUB 92.50\n"
+                "JPY/RUB 58.45",
                 reply_markup
             )
             return
 
         save_rate(
-            rates["usdt_rub"],
-            rates["usd_jpy"],
+            rates["usd_rub"],
             rates["jpy_rub"]
         )
 
@@ -352,6 +345,7 @@ def handle_message(data):
         send_message(
             chat_id,
             "Курсы сохранены ✅\n"
+            "USD/JPY рассчитан автоматически.\n"
             "От каждого курса отнято 0,15%.\n\n"
             + build_message(),
             reply_markup
@@ -388,12 +382,11 @@ def handle_message(data):
 
         send_message(
             chat_id,
-            "Введите 3 курса:\n\n"
+            "Введите курсы:\n\n"
             "курс\n"
-            "USDT/RUB 92.50\n"
-            "USD/JPY 158.25\n"
-            "JPY/RUB 0.5845\n\n"
-            "Бот отнимет от каждого курса 0,15%.",
+            "USD/RUB 92.50\n"
+            "JPY/RUB 58.45\n\n"
+            "Бот рассчитает USD/JPY автоматически и отнимет от всех курсов 0,15%.",
             reply_markup
         )
 
@@ -413,20 +406,20 @@ def handle_message(data):
                 chat_id,
                 "Неверный формат.\n\n"
                 "Используй так:\n"
-                "/addrate USDT/RUB 92.50 USD/JPY 158.25 JPY/RUB 0.5845",
+                "/addrate USD/RUB 92.50 JPY/RUB 58.45",
                 reply_markup
             )
             return
 
         save_rate(
-            rates["usdt_rub"],
-            rates["usd_jpy"],
+            rates["usd_rub"],
             rates["jpy_rub"]
         )
 
         send_message(
             chat_id,
             "Курсы сохранены ✅\n"
+            "USD/JPY рассчитан автоматически.\n"
             "От каждого курса отнято 0,15%.\n\n"
             + build_message(),
             reply_markup
