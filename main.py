@@ -73,7 +73,27 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    telegram_api("sendMessage", payload)
+    return telegram_api("sendMessage", payload)
+
+
+def edit_message(chat_id, message_id, text):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text
+    }
+
+    return telegram_api("editMessageText", payload)
+
+
+def pin_message(chat_id, message_id):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "disable_notification": True
+    }
+
+    return telegram_api("pinChatMessage", payload)
 
 
 def init_db():
@@ -107,6 +127,17 @@ def init_db():
         )
     """)
 
+    # Миграция старой таблицы: добавляем новые поля, если их еще нет
+    try:
+        cur.execute("ALTER TABLE broadcast_groups ADD COLUMN mode TEXT DEFAULT 'send'")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE broadcast_groups ADD COLUMN message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -124,7 +155,7 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def add_broadcast_group(chat_id, title):
+def add_broadcast_group(chat_id, title, mode="send", message_id=None):
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
     conn = sqlite3.connect(DB_NAME)
@@ -132,10 +163,25 @@ def add_broadcast_group(chat_id, title):
 
     cur.execute(
         """
-        INSERT OR REPLACE INTO broadcast_groups (chat_id, title, created_at)
-        VALUES (?, ?, ?)
+        INSERT OR REPLACE INTO broadcast_groups (
+            chat_id, title, created_at, mode, message_id
+        )
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (str(chat_id), title, now)
+        (str(chat_id), title, now, mode, message_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def update_group_message_id(chat_id, message_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute(
+        "UPDATE broadcast_groups SET message_id = ? WHERE chat_id = ?",
+        (message_id, str(chat_id))
     )
 
     conn.commit()
@@ -163,7 +209,11 @@ def get_broadcast_groups():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    cur.execute("SELECT chat_id, title FROM broadcast_groups ORDER BY title")
+    cur.execute("""
+        SELECT chat_id, title, mode, message_id
+        FROM broadcast_groups
+        ORDER BY title
+    """)
     rows = cur.fetchall()
 
     conn.close()
@@ -277,14 +327,17 @@ def get_groups_message():
     if not rows:
         return (
             "Группы рассылки пока не добавлены.\n\n"
-            "Добавь бота в нужную группу и напиши там:\n"
-            "/addgroup"
+            "В группе можно использовать:\n"
+            "/addgroup — обычная рассылка\n"
+            "/addpin — закрепленное обновляемое сообщение"
         )
 
     text = "📣 Группы рассылки:\n\n"
 
-    for index, (chat_id, title) in enumerate(rows, start=1):
-        text += f"{index}. {title}\nID: {chat_id}\n\n"
+    for index, (chat_id, title, mode, message_id) in enumerate(rows, start=1):
+        mode_text = "закреп" if mode == "pin" else "обычная рассылка"
+        pin_text = f"\nMessage ID: {message_id}" if message_id else ""
+        text += f"{index}. {title}\nРежим: {mode_text}\nID: {chat_id}{pin_text}\n\n"
 
     return text
 
@@ -298,10 +351,30 @@ def broadcast():
 
     message = build_message()
 
-    for chat_id, title in groups:
+    for chat_id, title, mode, message_id in groups:
         try:
-            send_message(chat_id, message)
-            print(f"Отправлено в {title} ({chat_id})")
+            if mode == "pin":
+                if message_id:
+                    try:
+                        edit_message(chat_id, message_id, message)
+                        print(f"Закреп обновлен в {title} ({chat_id})")
+                    except Exception as edit_error:
+                        print(f"Не удалось обновить закреп, создаю новый: {edit_error}")
+                        sent = send_message(chat_id, message)
+                        new_message_id = sent["result"]["message_id"]
+                        pin_message(chat_id, new_message_id)
+                        update_group_message_id(chat_id, new_message_id)
+                        print(f"Создан новый закреп в {title} ({chat_id})")
+                else:
+                    sent = send_message(chat_id, message)
+                    new_message_id = sent["result"]["message_id"]
+                    pin_message(chat_id, new_message_id)
+                    update_group_message_id(chat_id, new_message_id)
+                    print(f"Создан закреп в {title} ({chat_id})")
+            else:
+                send_message(chat_id, message)
+                print(f"Отправлено в {title} ({chat_id})")
+
         except Exception as e:
             print(f"Ошибка отправки в {title} ({chat_id}): {e}")
 
@@ -384,13 +457,77 @@ def handle_message(data):
             send_message(chat_id, "Добавлять группы может только администратор бота.", reply_markup)
             return
 
-        add_broadcast_group(chat_id, title)
+        add_broadcast_group(chat_id, title, mode="send")
 
         send_message(
             chat_id,
-            f"✅ Группа добавлена в рассылку\n\nНазвание: {title}\nID: {chat_id}",
+            f"✅ Группа добавлена в обычную рассылку\n\nНазвание: {title}\nID: {chat_id}",
             reply_markup
         )
+        return
+
+    if text_lower == "/addpin":
+        if private_chat:
+            send_message(chat_id, "Эту команду нужно писать в группе.", reply_markup)
+            return
+
+        if not admin:
+            send_message(chat_id, "Добавлять закреп может только администратор бота.", reply_markup)
+            return
+
+        add_broadcast_group(chat_id, title, mode="pin", message_id=None)
+
+        try:
+            sent = send_message(chat_id, build_message())
+            message_id = sent["result"]["message_id"]
+            pin_message(chat_id, message_id)
+            update_group_message_id(chat_id, message_id)
+
+            send_message(
+                chat_id,
+                f"✅ Группа добавлена в режим закрепа\n\nНазвание: {title}\nID: {chat_id}\nMessage ID: {message_id}",
+                reply_markup
+            )
+        except Exception as e:
+            send_message(
+                chat_id,
+                "Группа добавлена в режим закрепа, но закрепить сообщение не удалось.\n\n"
+                "Проверь, что бот является администратором и имеет право закреплять сообщения.\n\n"
+                f"Ошибка: {e}",
+                reply_markup
+            )
+        return
+
+    if text_lower == "/updatepin":
+        if private_chat:
+            send_message(chat_id, "Эту команду нужно писать в группе.", reply_markup)
+            return
+
+        if not admin:
+            send_message(chat_id, "Обновлять закреп может только администратор бота.", reply_markup)
+            return
+
+        add_broadcast_group(chat_id, title, mode="pin", message_id=None)
+
+        try:
+            sent = send_message(chat_id, build_message())
+            message_id = sent["result"]["message_id"]
+            pin_message(chat_id, message_id)
+            update_group_message_id(chat_id, message_id)
+
+            send_message(
+                chat_id,
+                f"✅ Закреп создан заново\n\nMessage ID: {message_id}",
+                reply_markup
+            )
+        except Exception as e:
+            send_message(
+                chat_id,
+                "Не удалось создать закреп.\n\n"
+                "Проверь права администратора у бота.\n\n"
+                f"Ошибка: {e}",
+                reply_markup
+            )
         return
 
     if text_lower == "/removegroup":
@@ -565,7 +702,7 @@ def handle_message(data):
 
         if has_today_rate():
             broadcast()
-            send_message(chat_id, "Рассылка отправлена ✅", reply_markup)
+            send_message(chat_id, "Рассылка/обновление закрепов выполнено ✅", reply_markup)
         else:
             send_message(
                 chat_id,
