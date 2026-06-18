@@ -457,7 +457,13 @@ def handle_message(data):
     private_chat = is_private_chat(chat)
     admin = is_admin(user_id)
     reply_markup = get_keyboard(chat, user_id)
-
+    if private_chat and not admin:
+        send_message(
+            chat_id,
+            "Доступ ограничен.",
+            reply_markup
+        )
+        return
     if text_lower == "/chatid":
         send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
         return
