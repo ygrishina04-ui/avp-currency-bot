@@ -295,7 +295,6 @@ def build_message():
     return (
         f"📊 Курсы на сегодня {date[:5]}\n\n"
         f"💵 USD/RUB — {usd_rub:.3f}\n"
-        f"💴 USD/JPY — {usd_jpy:.2f}\n"
         f"🧮 JPY/RUB — {jpy_rub:.3f}"
     )
 def build_pin_message():
@@ -309,7 +308,6 @@ def build_pin_message():
     return (
         f"📊 {date[:5]} | "
         f"💵{usd_rub:.3f} | "
-        f"💴{usd_jpy:.2f} | "
         f"🧮{jpy_rub:.3f}"
     )
 
@@ -612,7 +610,6 @@ def handle_message(data):
         send_message(
             chat_id,
             "Курсы сохранены ✅\n"
-            "USD/JPY рассчитан автоматически.\n"
             "От каждого курса отнято 0,15%.\n\n"
             + build_message(),
             reply_markup
