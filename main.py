@@ -356,10 +356,42 @@ def worksheet_records(sheet_name):
     if not values:
         return []
 
-    headers = [normalize_header(x) for x in values[0]]
+    # Ищем строку заголовков среди первых 20 строк.
+    # Это позволяет работать, даже если над таблицей есть название или пустые строки.
+    normalized_rows = [
+        [normalize_header(cell) for cell in row]
+        for row in values[:20]
+    ]
+
+    if sheet_name == CLIENTS_SHEET_NAME:
+        required_headers = {CLIENT_COLUMN, TELEGRAM_ID_COLUMN}
+    else:
+        required_headers = {
+            CLIENT_COLUMN,
+            CAR_MODEL_COLUMN,
+            BODY_NUMBER_COLUMN,
+            RELEASE_DATE_COLUMN,
+        }
+
+    header_row_index = None
+    for index, row in enumerate(normalized_rows):
+        if required_headers.issubset(set(row)):
+            header_row_index = index
+            break
+
+    if header_row_index is None:
+        raise RuntimeError(
+            f"На листе «{sheet_name}» не найдена строка заголовков. "
+            f"Ожидались колонки: {', '.join(sorted(required_headers))}"
+        )
+
+    headers = normalized_rows[header_row_index]
     records = []
 
-    for sheet_row_number, raw_row in enumerate(values[1:], start=2):
+    for sheet_row_number, raw_row in enumerate(
+        values[header_row_index + 1:],
+        start=header_row_index + 2,
+    ):
         padded = raw_row + [""] * (len(headers) - len(raw_row))
         row = {
             headers[index]: str(padded[index]).strip()
@@ -389,6 +421,13 @@ def normalize_telegram_id(value):
     return re.sub(r"\.0$", "", text)
 
 
+def normalize_client_name(value):
+    text = str(value or "").replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text).strip().casefold()
+    text = text.replace("«", "").replace("»", "").replace('"', "")
+    return text
+
+
 def get_client_by_telegram_id(telegram_id, clients_rows=None):
     rows = clients_rows if clients_rows is not None else get_clients_rows()
     target_id = normalize_telegram_id(telegram_id)
@@ -411,7 +450,7 @@ def get_telegram_ids_by_client(client_name, clients_rows=None):
         row_client = str(row.get(CLIENT_COLUMN, "")).strip()
         telegram_id = normalize_telegram_id(row.get(TELEGRAM_ID_COLUMN))
 
-        if row_client == client_name and telegram_id:
+        if normalize_client_name(row_client) == normalize_client_name(client_name) and telegram_id:
             try:
                 result.append(int(telegram_id))
             except ValueError:
@@ -437,7 +476,7 @@ def get_active_cars_for_client(client_name, logistics_rows=None):
 
     cars = []
     for row in rows:
-        if str(row.get(CLIENT_COLUMN, "")).strip() != client_name:
+        if normalize_client_name(row.get(CLIENT_COLUMN, "")) != normalize_client_name(client_name):
             continue
 
         if not is_car_active(row):
@@ -609,11 +648,70 @@ def handle_car_callback(callback_query):
         return
 
     # Защита: клиент не сможет запросить чужую строку вручную.
-    if str(selected_car.get(CLIENT_COLUMN, "")).strip() != client_name:
+    if normalize_client_name(selected_car.get(CLIENT_COLUMN, "")) != normalize_client_name(client_name):
         send_message(chat_id, "У вас нет доступа к этому автомобилю.")
         return
 
     send_message(chat_id, format_car_status(selected_car))
+
+
+def build_debug_cars_message(telegram_id):
+    clients_rows = get_clients_rows()
+    logistics_rows = get_logistics_rows()
+    client_name = get_client_by_telegram_id(telegram_id, clients_rows)
+
+    if not client_name:
+        return (
+            "DEBUG\n"
+            f"Telegram ID: {telegram_id}\n"
+            "Клиент по Telegram ID не найден."
+        )
+
+    same_client = [
+        row for row in logistics_rows
+        if normalize_client_name(row.get(CLIENT_COLUMN, ""))
+        == normalize_client_name(client_name)
+    ]
+
+    with_body = [
+        row for row in same_client
+        if is_nonempty(row.get(BODY_NUMBER_COLUMN))
+    ]
+
+    active = [
+        row for row in with_body
+        if is_car_active(row)
+    ]
+
+    sample_clients = []
+    for row in logistics_rows:
+        value = str(row.get(CLIENT_COLUMN, "")).strip()
+        if value and value not in sample_clients:
+            sample_clients.append(value)
+        if len(sample_clients) >= 10:
+            break
+
+    examples = []
+    for row in same_client[:5]:
+        examples.append(
+            f"• {row.get(CAR_MODEL_COLUMN, '')} / "
+            f"{row.get(BODY_NUMBER_COLUMN, '')} / "
+            f"ВЫПУСК ДАТА: {row.get(RELEASE_DATE_COLUMN, '') or 'ПУСТО'}"
+        )
+
+    return (
+        "DEBUG АВТОМОБИЛЕЙ\n\n"
+        f"Telegram ID: {telegram_id}\n"
+        f"Найденный клиент: {client_name}\n"
+        f"Всего строк в «{LOGISTICS_SHEET_NAME}»: {len(logistics_rows)}\n"
+        f"Строк этого клиента: {len(same_client)}\n"
+        f"С заполненным номером кузова: {len(with_body)}\n"
+        f"Активных автомобилей: {len(active)}\n\n"
+        f"Примеры строк клиента:\n"
+        + ("\n".join(examples) if examples else "нет")
+        + "\n\nПервые клиенты на листе:\n"
+        + ("\n".join(f"• {x}" for x in sample_clients) if sample_clients else "нет")
+    )
 
 
 # ============================================================
@@ -1020,6 +1118,17 @@ def handle_message(data):
 
     if text_lower == "/chatid":
         send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
+        return
+
+    if text_lower in ["/debugcars", "/debugавто"]:
+        if not private_chat or not admin:
+            send_message(chat_id, "Команда доступна только администратору.", reply_markup)
+            return
+
+        try:
+            send_message(chat_id, build_debug_cars_message(user_id), reply_markup)
+        except Exception as exc:
+            send_message(chat_id, f"DEBUG ERROR: {exc}", reply_markup)
         return
 
     if text_lower in [
