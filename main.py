@@ -22,6 +22,38 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 DB_NAME = os.getenv("DB_NAME", "rates.db")
 
+_google_worksheet = None
+_google_lock = threading.Lock()
+
+
+def get_rates_worksheet():
+    global _google_worksheet
+
+    if _google_worksheet is not None:
+        return _google_worksheet
+
+    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+
+    credentials_info["private_key"] = credentials_info["private_key"].replace("\\n", "\n")
+
+    credentials = Credentials.from_service_account_info(
+        credentials_info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+    )
+
+    client = gspread.authorize(credentials)
+
+    spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
+
+    worksheet = spreadsheet.worksheet("BOT_КУРСЫ")
+
+    _google_worksheet = worksheet
+
+    return worksheet
+    
 JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
