@@ -125,7 +125,10 @@ def is_admin(user_id):
 def get_keyboard(chat, user_id):
     if not is_private_chat(chat):
         return {
-            "keyboard": [["📊 Курс"]],
+            "keyboard": [
+                ["🚗 Уточнить место дислокации груза"],
+                ["📊 Курс"],
+            ],
             "resize_keyboard": True,
         }
 
@@ -1217,13 +1220,6 @@ def handle_message(data):
         "/cars",
         "/авто",
     ]:
-        if not private_chat:
-            send_message(
-                chat_id,
-                "Проверка автомобиля доступна только в личном чате с ботом.",
-                reply_markup,
-            )
-            return
 
         try:
             show_client_cars(chat_id, user_id)
