@@ -659,7 +659,9 @@ def handle_car_callback(callback_query):
     message = callback_query.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     telegram_id = callback_query.get("from", {}).get("id")
-
+    chat_type = message.get("chat", {}).get("type")
+    access_id = telegram_id if chat_type == "private" else chat_id
+    
     if not callback_id or not chat_id or not data.startswith("car:"):
         return
 
@@ -672,7 +674,7 @@ def handle_car_callback(callback_query):
         return
 
     clients_rows = get_clients_rows()
-    client_name = get_client_by_telegram_id(telegram_id, clients_rows)
+    client_name = get_client_by_telegram_id(access_id, clients_rows)
 
     if not client_name:
         send_message(chat_id, "Ваш аккаунт не привязан к дилеру.")
@@ -1222,7 +1224,8 @@ def handle_message(data):
     ]:
 
         try:
-            show_client_cars(chat_id, user_id)
+            access_id = user_id if private_chat else chat_id
+            show_client_cars(chat_id, access_id)
         except Exception as exc:
             print(f"Ошибка получения автомобилей: {exc}", flush=True)
             send_message(
