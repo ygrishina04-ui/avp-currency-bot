@@ -22,40 +22,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Vladivostok")
 DB_NAME = os.getenv("DB_NAME", "rates.db")
 
-_google_worksheet = None
-_google_lock = threading.Lock()
-
-
-def get_rates_worksheet():
-    global _google_worksheet
-
-    if _google_worksheet is not None:
-        return _google_worksheet
-
-    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-
-    credentials_info["private_key"] = credentials_info["private_key"].replace("\\n", "\n")
-
-    credentials = Credentials.from_service_account_info(
-        credentials_info,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-    )
-
-    client = gspread.authorize(credentials)
-
-    spreadsheet = client.open_by_key(GOOGLE_SPREADSHEET_ID)
-
-    worksheet = spreadsheet.worksheet("BOT_КУРСЫ")
-
-    _google_worksheet = worksheet
-
-    return worksheet
-    
-JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
+JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
+RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
 
 CLIENTS_SHEET_NAME = os.getenv("JAPAN_CLIENTS_SHEET", "Клиенты")
 LOGISTICS_SHEET_NAME = os.getenv("JAPAN_LOGISTICS_SHEET", "Сверка 2.0")
@@ -135,7 +105,9 @@ waiting_for_rate = set()
 web_app = Flask(__name__)
 
 _google_client = None
+_google_worksheet = None
 _google_lock = threading.Lock()
+_rates_lock = threading.Lock()
 
 
 # ============================================================
@@ -356,9 +328,16 @@ def get_google_client():
                 "GOOGLE_CREDENTIALS_JSON содержит некорректный JSON"
             ) from exc
 
+        private_key = credentials_info.get("private_key")
+        if private_key:
+            credentials_info["private_key"] = private_key.replace(
+                "\\n",
+                "\n",
+            )
+
         scopes = [
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
-            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
         ]
 
         credentials = Credentials.from_service_account_info(
@@ -375,6 +354,40 @@ def get_japan_spreadsheet():
         raise RuntimeError("JAPAN_SPREADSHEET_ID не задан")
 
     return get_google_client().open_by_key(JAPAN_SPREADSHEET_ID)
+
+
+def get_rates_worksheet():
+    global _google_worksheet
+
+    if _google_worksheet is not None:
+        return _google_worksheet
+
+    with _rates_lock:
+        if _google_worksheet is not None:
+            return _google_worksheet
+
+        if not GOOGLE_SPREADSHEET_ID:
+            raise RuntimeError("GOOGLE_SPREADSHEET_ID не задан")
+
+        spreadsheet = get_google_client().open_by_key(
+            GOOGLE_SPREADSHEET_ID
+        )
+
+        try:
+            worksheet = spreadsheet.worksheet(RATES_SHEET_NAME)
+        except gspread.WorksheetNotFound as exc:
+            raise RuntimeError(
+                f"В таблице не найден лист «{RATES_SHEET_NAME}»"
+            ) from exc
+
+        if not worksheet.row_values(1):
+            worksheet.append_row(
+                ["Дата", "USD/RUB", "USD/JPY", "Создано"],
+                value_input_option="USER_ENTERED",
+            )
+
+        _google_worksheet = worksheet
+        return _google_worksheet
 
 
 def normalize_header(value):
@@ -944,42 +957,77 @@ def get_broadcast_groups():
     return rows
 
 
+def parse_sheet_number(value):
+    normalized = (
+        str(value or "")
+        .strip()
+        .replace("\xa0", "")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
+
+    if not normalized:
+        raise ValueError("Пустое значение курса")
+
+    return float(normalized)
+
+
 def save_rate(usd_rub, jpy_rub):
+    if usd_rub <= 0 or jpy_rub <= 0:
+        raise ValueError("Курсы должны быть больше нуля")
+
     usd_jpy = (usd_rub / jpy_rub) * 100
     now = datetime.now(ZoneInfo(TIMEZONE))
 
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO rates
-        (date, usd_rub, usd_jpy, jpy_rub, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
+    worksheet = get_rates_worksheet()
+    worksheet.append_row(
+        [
             now.strftime("%d.%m.%Y"),
-            usd_rub * DISCOUNT_FACTOR,
-            usd_jpy * DISCOUNT_FACTOR,
-            jpy_rub * DISCOUNT_FACTOR,
-            now.isoformat(),
-        ),
+            round(usd_rub, 6),
+            round(usd_jpy, 6),
+            now.strftime("%d.%m.%Y %H:%M:%S"),
+        ],
+        value_input_option="USER_ENTERED",
     )
-    conn.commit()
-    conn.close()
+
+    print(
+        "Курсы сохранены в Google Sheets: "
+        f"USD/RUB={usd_rub}; USD/JPY={usd_jpy}",
+        flush=True,
+    )
 
 
 def get_latest_rate():
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT date, usd_rub, usd_jpy, jpy_rub
-        FROM rates
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    conn.close()
-    return row
+    worksheet = get_rates_worksheet()
+    rows = worksheet.get_all_values()
+
+    if len(rows) < 2:
+        return None
+
+    latest_row = None
+    for row in reversed(rows[1:]):
+        if any(str(cell).strip() for cell in row):
+            latest_row = row
+            break
+
+    if not latest_row or len(latest_row) < 3:
+        return None
+
+    date = str(latest_row[0]).strip()
+    usd_rub_input = parse_sheet_number(latest_row[1])
+    usd_jpy_input = parse_sheet_number(latest_row[2])
+
+    if usd_rub_input <= 0 or usd_jpy_input <= 0:
+        raise ValueError("В последней строке BOT_КУРСЫ некорректные значения")
+
+    jpy_rub_input = (usd_rub_input / usd_jpy_input) * 100
+
+    return (
+        date,
+        usd_rub_input * DISCOUNT_FACTOR,
+        usd_jpy_input * DISCOUNT_FACTOR,
+        jpy_rub_input * DISCOUNT_FACTOR,
+    )
 
 
 def has_today_rate():
@@ -1386,8 +1434,12 @@ def home():
 
 @web_app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    handle_update(data)
+    try:
+        data = request.get_json(force=True)
+        handle_update(data)
+    except Exception as exc:
+        print(f"Ошибка обработки webhook: {exc}", flush=True)
+
     return "ok"
 
 
@@ -1396,6 +1448,18 @@ def main():
         raise RuntimeError("BOT_TOKEN не задан")
 
     init_db()
+
+    try:
+        get_rates_worksheet()
+        print("Таблица курсов подключена ✅", flush=True)
+    except Exception as exc:
+        print(f"Ошибка подключения таблицы курсов: {exc}", flush=True)
+
+    try:
+        get_japan_spreadsheet()
+        print("Таблица логистики подключена ✅", flush=True)
+    except Exception as exc:
+        print(f"Ошибка подключения таблицы логистики: {exc}", flush=True)
 
     threading.Thread(
         target=auto_broadcast_loop,
