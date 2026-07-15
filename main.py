@@ -30,7 +30,7 @@ RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
 CLIENTS_SHEET_NAME = os.getenv("JAPAN_CLIENTS_SHEET", "Клиенты")
 LOGISTICS_SHEET_NAME = os.getenv("JAPAN_LOGISTICS_SHEET", "Сверка 2.0")
 
-WATCH_INTERVAL_SECONDS = int(os.getenv("JAPAN_WATCH_INTERVAL_SECONDS", "60"))
+WATCH_INTERVAL_SECONDS = int(os.getenv("JAPAN_WATCH_INTERVAL_SECONDS", "300"))
 DISCOUNT_FACTOR = 0.9985  # минус 0,15%
 
 ADMIN_USER_IDS = {
@@ -519,15 +519,16 @@ def is_car_active(row):
     return not is_nonempty(row.get(RELEASE_DATE_COLUMN))
 
 
-def get_active_cars_for_client(client_name, logistics_rows=None):
+def get_cars_for_client(client_name, logistics_rows=None):
+    """Возвращает все автомобили клиента с заполненным номером кузова.
+
+    Активные автомобили идут первыми, завершённые — после них.
+    """
     rows = logistics_rows if logistics_rows is not None else get_logistics_rows()
 
     cars = []
     for row in rows:
         if normalize_client_name(row.get(CLIENT_COLUMN, "")) != normalize_client_name(client_name):
-            continue
-
-        if not is_car_active(row):
             continue
 
         body_number = str(row.get(BODY_NUMBER_COLUMN, "")).strip()
@@ -536,7 +537,23 @@ def get_active_cars_for_client(client_name, logistics_rows=None):
 
         cars.append(row)
 
+    cars.sort(
+        key=lambda row: (
+            1 if is_nonempty(row.get(RELEASE_DATE_COLUMN)) else 0,
+            str(row.get(CAR_MODEL_COLUMN, "")).casefold(),
+            str(row.get(BODY_NUMBER_COLUMN, "")).casefold(),
+        )
+    )
     return cars
+
+
+def get_active_cars_for_client(client_name, logistics_rows=None):
+    """Оставлено для совместимости с debug-функциями."""
+    return [
+        row
+        for row in get_cars_for_client(client_name, logistics_rows)
+        if is_car_active(row)
+    ]
 
 
 def format_date(value):
@@ -557,7 +574,7 @@ def format_date(value):
 
 
 def get_current_stage(row):
-    # 1. Автомобиль выпущен
+    """Определяет этап по самой поздней заполненной фактической дате."""
     if is_nonempty(row.get(RELEASE_DATE_COLUMN)):
         return {
             "name": "Автомобиль выпущен",
@@ -566,7 +583,6 @@ def get_current_stage(row):
             "completed": True,
         }
 
-    # 2. Автомобиль уже прибыл в Россию
     if is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
         return {
             "name": "Автомобиль прибыл в Россию и ожидает выпуска",
@@ -575,7 +591,6 @@ def get_current_stage(row):
             "completed": False,
         }
 
-    # 3. Автомобиль вышел из Китая
     if is_nonempty(row.get(CHINA_EXIT_FACT_COLUMN)):
         return {
             "name": "Автомобиль следует в Россию",
@@ -584,7 +599,6 @@ def get_current_stage(row):
             "completed": False,
         }
 
-    # 4. Автомобиль прибыл в Китай/Корею
     if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
         return {
             "name": "Автомобиль находится в Китае/Корее и ожидает выхода",
@@ -593,7 +607,6 @@ def get_current_stage(row):
             "completed": False,
         }
 
-    # 5. Автомобиль вышел из Японии
     if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
         return {
             "name": "Автомобиль следует в Китай/Корею",
@@ -602,7 +615,6 @@ def get_current_stage(row):
             "completed": False,
         }
 
-    # 6. Автомобиль доставлен на ярд
     if is_nonempty(row.get(YARD_FACT_COLUMN)):
         return {
             "name": "Ожидается выход из Японии",
@@ -611,7 +623,6 @@ def get_current_stage(row):
             "completed": False,
         }
 
-    # 7. Самый первый этап
     return {
         "name": "Ожидается доставка автомобиля на ярд",
         "date_label": "Плановая дата доставки на ярд",
@@ -620,21 +631,54 @@ def get_current_stage(row):
     }
 
 
+def build_car_history(row):
+    """Формирует хронологию по заполненным фактическим датам."""
+    events = [
+        ("Доставлен на ярд", YARD_FACT_COLUMN),
+        ("Вышел из Японии", JAPAN_EXIT_FACT_COLUMN),
+        ("Прибыл в Китай/Корею", CHINA_KOREA_ARRIVAL_COLUMN),
+        ("Вышел из Китая", CHINA_EXIT_FACT_COLUMN),
+        ("Прибыл в Россию", RUSSIA_ARRIVAL_FACT_COLUMN),
+        ("Выпущен", RELEASE_DATE_COLUMN),
+    ]
+
+    lines = []
+    for label, column in events:
+        value = row.get(column)
+        if is_nonempty(value):
+            lines.append(f"• {format_date(value)} — {label}")
+
+    return lines
+
+
 def format_car_status(row):
     model = str(row.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
     body_number = str(row.get(BODY_NUMBER_COLUMN, "")).strip() or "не указан"
     stage = get_current_stage(row)
 
-    return (
+    text = (
         f"🚗 {model}\n"
         f"🔢 Номер кузова: {body_number}\n\n"
         f"📍 Текущий этап: {stage['name']}\n"
         f"📅 {stage['date_label']}: {stage['date']}"
     )
 
+    if (
+        is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN))
+        or is_nonempty(row.get(RELEASE_DATE_COLUMN))
+    ):
+        history = build_car_history(row)
+        if history:
+            text += "\n\n🗓 Хронология перевозки:\n" + "\n".join(history)
 
-def encode_car_row(row_number):
-    return f"car:{row_number}"
+    return text
+
+def normalize_body_number(value):
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def encode_car_body(body_number):
+    return f"car:{normalize_body_number(body_number)}"
 
 
 def build_cars_keyboard(cars):
@@ -643,16 +687,18 @@ def build_cars_keyboard(cars):
     for car in cars:
         model = str(car.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
         body = str(car.get(BODY_NUMBER_COLUMN, "")).strip()
-        text = f"{model} / {body}"
+        completed = is_nonempty(car.get(RELEASE_DATE_COLUMN))
+        prefix = "✅ " if completed else "🚗 "
+        text = f"{prefix}{model} / {body}"
 
         if len(text) > 60:
-            text = f"{model[:28]}… / {body[-24:]}"
+            text = f"{prefix}{model[:24]}… / {body[-22:]}"
 
         buttons.append(
             [
                 {
                     "text": text,
-                    "callback_data": encode_car_row(car["_sheet_row"]),
+                    "callback_data": encode_car_body(body),
                 }
             ]
         )
@@ -673,12 +719,12 @@ def show_client_cars(chat_id, telegram_id):
         return
 
     logistics_rows = get_logistics_rows()
-    cars = get_active_cars_for_client(client_name, logistics_rows)
+    cars = get_cars_for_client(client_name, logistics_rows)
 
     if not cars:
         send_message(
             chat_id,
-            "Сейчас у вас нет автомобилей в активной перевозке.",
+            "Автомобили по вашему аккаунту не найдены.",
         )
         return
 
@@ -693,27 +739,27 @@ def handle_car_callback(callback_query):
     callback_id = callback_query.get("id")
     data = callback_query.get("data", "")
     message = callback_query.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    telegram_id = callback_query.get("from", {}).get("id")
-    chat_type = message.get("chat", {}).get("type")
-    access_id = telegram_id if chat_type == "private" else chat_id
-    
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    chat_type = chat.get("type")
+    user_id = callback_query.get("from", {}).get("id")
+    access_id = user_id if chat_type == "private" else chat_id
+
     if not callback_id or not chat_id or not data.startswith("car:"):
         return
 
     answer_callback_query(callback_id)
+    requested_body = normalize_body_number(data.split(":", 1)[1])
 
-    try:
-        row_number = int(data.split(":", 1)[1])
-    except (ValueError, IndexError):
-        send_message(chat_id, "Не удалось определить автомобиль.")
+    if not requested_body:
+        send_message(chat_id, "Не удалось определить номер кузова.")
         return
 
     clients_rows = get_clients_rows()
     client_name = get_client_by_telegram_id(access_id, clients_rows)
 
     if not client_name:
-        send_message(chat_id, "Ваш аккаунт не привязан к дилеру.")
+        send_message(chat_id, "Этот аккаунт или чат не привязан к дилеру.")
         return
 
     logistics_rows = get_logistics_rows()
@@ -721,7 +767,9 @@ def handle_car_callback(callback_query):
         (
             row
             for row in logistics_rows
-            if row.get("_sheet_row") == row_number
+            if normalize_body_number(row.get(BODY_NUMBER_COLUMN)) == requested_body
+            and normalize_client_name(row.get(CLIENT_COLUMN, ""))
+            == normalize_client_name(client_name)
         ),
         None,
     )
@@ -731,11 +779,6 @@ def handle_car_callback(callback_query):
             chat_id,
             "Автомобиль не найден. Обновите список и попробуйте ещё раз.",
         )
-        return
-
-    # Защита: клиент не сможет запросить чужую строку вручную.
-    if normalize_client_name(selected_car.get(CLIENT_COLUMN, "")) != normalize_client_name(client_name):
-        send_message(chat_id, "У вас нет доступа к этому автомобилю.")
         return
 
     send_message(chat_id, format_car_status(selected_car))
@@ -1258,7 +1301,6 @@ def handle_message(data):
         "/cars",
         "/авто",
     ]:
-
         try:
             access_id = user_id if private_chat else chat_id
             show_client_cars(chat_id, access_id)
