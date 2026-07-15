@@ -574,88 +574,64 @@ def format_date(value):
 
 
 def get_current_stage(row):
-    """Определяет текущий этап по последнему заполненному полю маршрута.
+    """Статус определяется по фактическим событиям.
 
-    Учитываются и плановые, и фактические даты. Проверка идет
-    от самого позднего этапа перевозки к самому раннему.
+    Плановые даты не переводят автомобиль на следующий этап,
+    а выводятся отдельно в сообщении.
     """
-    stage_checks = [
-        {
-            "column": RELEASE_DATE_COLUMN,
+
+    if is_nonempty(row.get(RELEASE_DATE_COLUMN)):
+        return {
             "name": "Автомобиль выпущен",
             "date_label": "Дата выпуска",
+            "date": format_date(row.get(RELEASE_DATE_COLUMN)),
             "completed": True,
-        },
-        {
-            "column": RUSSIA_ARRIVAL_FACT_COLUMN,
+        }
+
+    if is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
+        return {
             "name": "Автомобиль прибыл в Россию и ожидает выпуска",
             "date_label": "Фактическая дата прибытия в РФ",
+            "date": format_date(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)),
             "completed": False,
-        },
-        {
-            "column": RUSSIA_ARRIVAL_PLAN_COLUMN,
-            "name": "Автомобиль следует в Россию",
-            "date_label": "Плановая дата прибытия в РФ",
-            "completed": False,
-        },
-        {
-            "column": CHINA_EXIT_FACT_COLUMN,
-            "name": "Автомобиль вышел из Китая и следует в Россию",
-            "date_label": "Фактическая дата выхода из Китая",
-            "completed": False,
-        },
-        {
-            "column": CHINA_EXIT_PLAN_COLUMN,
-            "name": "Ожидается выход из Китая",
-            "date_label": "Плановая дата выхода из Китая",
-            "completed": False,
-        },
-        {
-            "column": CHINA_KOREA_ARRIVAL_COLUMN,
-            "name": "Автомобиль прибыл в Китай/Корею",
-            "date_label": "Дата прибытия в Китай/Корею",
-            "completed": False,
-        },
-        {
-            "column": JAPAN_EXIT_FACT_COLUMN,
-            "name": "Автомобиль вышел из Японии и следует в Китай/Корею",
-            "date_label": "Фактическая дата выхода из Японии",
-            "completed": False,
-        },
-        {
-            "column": JAPAN_EXIT_PLAN_COLUMN,
-            "name": "Ожидается выход из Японии",
-            "date_label": "Плановая дата выхода из Японии",
-            "completed": False,
-        },
-        {
-            "column": YARD_FACT_COLUMN,
-            "name": "Автомобиль доставлен на ярд",
-            "date_label": "Фактическая дата доставки на ярд",
-            "completed": False,
-        },
-        {
-            "column": YARD_PLAN_COLUMN,
-            "name": "Ожидается доставка автомобиля на ярд",
-            "date_label": "Плановая дата доставки на ярд",
-            "completed": False,
-        },
-    ]
+        }
 
-    for stage in stage_checks:
-        value = row.get(stage["column"])
-        if is_nonempty(value):
-            return {
-                "name": stage["name"],
-                "date_label": stage["date_label"],
-                "date": format_date(value),
-                "completed": stage["completed"],
-            }
+    if is_nonempty(row.get(CHINA_EXIT_FACT_COLUMN)):
+        return {
+            "name": "Автомобиль следует в Россию",
+            "date_label": "Фактическая дата выхода из Китая",
+            "date": format_date(row.get(CHINA_EXIT_FACT_COLUMN)),
+            "completed": False,
+        }
+
+    if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
+        return {
+            "name": "Автомобиль находится в Китае/Корее и ожидает выхода",
+            "date_label": "Дата прибытия в Китай/Корею",
+            "date": format_date(row.get(CHINA_KOREA_ARRIVAL_COLUMN)),
+            "completed": False,
+        }
+
+    if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
+        return {
+            "name": "Автомобиль следует в Китай/Корею",
+            "date_label": "Фактическая дата выхода из Японии",
+            "date": format_date(row.get(JAPAN_EXIT_FACT_COLUMN)),
+            "completed": False,
+        }
+
+    if is_nonempty(row.get(YARD_FACT_COLUMN)):
+        return {
+            "name": "Ожидает выхода из Японии",
+            "date_label": "Дата доставки на ярд",
+            "date": format_date(row.get(YARD_FACT_COLUMN)),
+            "completed": False,
+        }
 
     return {
-        "name": "Этап перевозки уточняется",
-        "date_label": "Дата",
-        "date": "уточняется",
+        "name": "Ожидает доставки на ярд",
+        "date_label": "Плановая дата доставки на ярд",
+        "date": format_date(row.get(YARD_PLAN_COLUMN)),
         "completed": False,
     }
 
@@ -688,15 +664,39 @@ def format_car_status(row):
     text = (
         f"🚗 {model}\n"
         f"🔢 Номер кузова: {body_number}\n\n"
-        f"📍 Текущий этап: {stage['name']}\n"
-        f"📅 {stage['date_label']}: {stage['date']}"
+        f"📍 Текущий статус: {stage['name']}"
     )
+
+    # Показываем дату текущего фактического события
+    if stage["date"] != "уточняется":
+        text += f"\n📅 {stage['date_label']}: {stage['date']}"
+
+    # Будущие планы показываем отдельно и не используем
+    # для определения фактического статуса автомобиля.
+    plan_dates = [
+        ("План доставки на ярд", YARD_PLAN_COLUMN),
+        ("План выхода из Японии", JAPAN_EXIT_PLAN_COLUMN),
+        ("План выхода из Китая", CHINA_EXIT_PLAN_COLUMN),
+        ("План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+    ]
+
+    plans = []
+
+    for label, column in plan_dates:
+        value = row.get(column)
+
+        if is_nonempty(value):
+            plans.append(f"📅 {label}: {format_date(value)}")
+
+    if plans:
+        text += "\n\n" + "\n".join(plans)
 
     if (
         is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN))
         or is_nonempty(row.get(RELEASE_DATE_COLUMN))
     ):
         history = build_car_history(row)
+
         if history:
             text += "\n\n🗓 Хронология перевозки:\n" + "\n".join(history)
 
