@@ -49,11 +49,11 @@ BODY_NUMBER_COLUMN = "Номер кузова"
 
 YARD_PLAN_COLUMN = "ПЛАН дата доставки на ярд"
 YARD_FACT_COLUMN = "ФАКТ дата доставки на ярд"
-JAPAN_EXIT_PLAN_COLUMN = "ПЛАН выхода из Японии"
+JAPAN_EXIT_PLAN_COLUMN = "ПЛАН выхода из Япония"
 JAPAN_EXIT_FACT_COLUMN = "ФАКТ выхода из Японии"
-CHINA_KOREA_ARRIVAL_COLUMN = "Дата прибытия в Китай/Корею"
-CHINA_EXIT_PLAN_COLUMN = "ПЛАН выхода из Китай"
-CHINA_EXIT_FACT_COLUMN = "ФАКТ выхода из Китай"
+CHINA_KOREA_ARRIVAL_COLUMN = "Дата прибытия в порт перегруза"
+CHINA_EXIT_PLAN_COLUMN = "ПЛАН выхода из порта перегруза"
+CHINA_EXIT_FACT_COLUMN = "ФАКТ выхода из порта перегруза"
 RUSSIA_ARRIVAL_PLAN_COLUMN = "ПЛАН прибытия в РФ"
 RUSSIA_ARRIVAL_FACT_COLUMN = "ФАКТ прибытия в РФ"
 RELEASE_DATE_COLUMN = "ВЫПУСК ДАТА"
@@ -65,9 +65,9 @@ TRACKED_COLUMNS = {
     YARD_FACT_COLUMN: ("Автомобиль доставлен на ярд", "fact"),
     JAPAN_EXIT_PLAN_COLUMN: ("Плановая дата выхода из Японии", "plan"),
     JAPAN_EXIT_FACT_COLUMN: ("Автомобиль вышел из Японии", "fact"),
-    CHINA_KOREA_ARRIVAL_COLUMN: ("Дата прибытия в Китай/Корею", "fact"),
-    CHINA_EXIT_PLAN_COLUMN: ("Плановая дата выхода из Китая", "plan"),
-    CHINA_EXIT_FACT_COLUMN: ("Автомобиль вышел из Китая", "fact"),
+    CHINA_KOREA_ARRIVAL_COLUMN: ("Дата прибытия в порт перегруза", "fact"),
+    CHINA_EXIT_PLAN_COLUMN: ("Плановая дата выхода из порта перегруза", "plan"),
+    CHINA_EXIT_FACT_COLUMN: ("Автомобиль вышел из порта перегруза", "fact"),
     RUSSIA_ARRIVAL_PLAN_COLUMN: ("Плановая дата прибытия в Россию", "plan"),
     RUSSIA_ARRIVAL_FACT_COLUMN: ("Автомобиль прибыл в Россию", "fact"),
     RELEASE_DATE_COLUMN: ("Автомобиль выпущен", "fact"),
@@ -88,10 +88,10 @@ STAGES = [
         "date_label": "Плановая дата выхода из Японии",
     },
     {
-        "name": "Ожидается выход из Китая",
+        "name": "Ожидается выход из порта перегруза",
         "plan": CHINA_EXIT_PLAN_COLUMN,
         "fact": CHINA_EXIT_FACT_COLUMN,
-        "date_label": "Плановая дата выхода из Китая",
+        "date_label": "Плановая дата выхода из порта перегруза",
     },
     {
         "name": "Автомобиль следует в Россию",
@@ -603,14 +603,14 @@ def get_current_stage(row):
     if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
         return {
             "code": "china_arrived",
-            "name": "Автомобиль находится в Китае/Корее и ожидает отправку",
+            "name": "Автомобиль находится в порту перегруза и ожидает отправку",
             "completed": False,
         }
 
     if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
         return {
             "code": "left_japan",
-            "name": "Автомобиль следует в Китай/Корею",
+            "name": "Автомобиль следует в порт перегруза",
             "completed": False,
         }
 
@@ -641,11 +641,11 @@ def get_stage_plan_lines(row, stage_code):
             ("План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
         ],
         "left_japan": [
-            ("План выхода из Китая", CHINA_EXIT_PLAN_COLUMN),
+            ("План выхода из порта перегруза", CHINA_EXIT_PLAN_COLUMN),
             ("План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
         ],
         "china_arrived": [
-            ("План выхода из Китая", CHINA_EXIT_PLAN_COLUMN),
+            ("План выхода из порта перегруза", CHINA_EXIT_PLAN_COLUMN),
             ("План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
         ],
         "left_china": [
@@ -672,8 +672,8 @@ def build_car_history(row):
     events = [
         ("Доставлен на ярд", YARD_FACT_COLUMN),
         ("Вышел из Японии", JAPAN_EXIT_FACT_COLUMN),
-        ("Прибыл в Китай/Корею", CHINA_KOREA_ARRIVAL_COLUMN),
-        ("Вышел из Китая", CHINA_EXIT_FACT_COLUMN),
+        ("Прибыл в порт перегруза", CHINA_KOREA_ARRIVAL_COLUMN),
+        ("Вышел из порта перегруза", CHINA_EXIT_FACT_COLUMN),
         ("Прибыл в Россию", RUSSIA_ARRIVAL_FACT_COLUMN),
         ("Выпущен", RELEASE_DATE_COLUMN),
     ]
