@@ -574,59 +574,88 @@ def format_date(value):
 
 
 def get_current_stage(row):
-    """Определяет этап по самой поздней заполненной фактической дате."""
-    if is_nonempty(row.get(RELEASE_DATE_COLUMN)):
-        return {
+    """Определяет текущий этап по последнему заполненному полю маршрута.
+
+    Учитываются и плановые, и фактические даты. Проверка идет
+    от самого позднего этапа перевозки к самому раннему.
+    """
+    stage_checks = [
+        {
+            "column": RELEASE_DATE_COLUMN,
             "name": "Автомобиль выпущен",
             "date_label": "Дата выпуска",
-            "date": format_date(row.get(RELEASE_DATE_COLUMN)),
             "completed": True,
-        }
-
-    if is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
-        return {
+        },
+        {
+            "column": RUSSIA_ARRIVAL_FACT_COLUMN,
             "name": "Автомобиль прибыл в Россию и ожидает выпуска",
             "date_label": "Фактическая дата прибытия в РФ",
-            "date": format_date(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)),
             "completed": False,
-        }
-
-    if is_nonempty(row.get(CHINA_EXIT_FACT_COLUMN)):
-        return {
+        },
+        {
+            "column": RUSSIA_ARRIVAL_PLAN_COLUMN,
             "name": "Автомобиль следует в Россию",
             "date_label": "Плановая дата прибытия в РФ",
-            "date": format_date(row.get(RUSSIA_ARRIVAL_PLAN_COLUMN)),
             "completed": False,
-        }
-
-    if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
-        return {
-            "name": "Автомобиль находится в Китае/Корее и ожидает выхода",
+        },
+        {
+            "column": CHINA_EXIT_FACT_COLUMN,
+            "name": "Автомобиль вышел из Китая и следует в Россию",
+            "date_label": "Фактическая дата выхода из Китая",
+            "completed": False,
+        },
+        {
+            "column": CHINA_EXIT_PLAN_COLUMN,
+            "name": "Ожидается выход из Китая",
             "date_label": "Плановая дата выхода из Китая",
-            "date": format_date(row.get(CHINA_EXIT_PLAN_COLUMN)),
             "completed": False,
-        }
-
-    if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
-        return {
-            "name": "Автомобиль следует в Китай/Корею",
+        },
+        {
+            "column": CHINA_KOREA_ARRIVAL_COLUMN,
+            "name": "Автомобиль прибыл в Китай/Корею",
             "date_label": "Дата прибытия в Китай/Корею",
-            "date": format_date(row.get(CHINA_KOREA_ARRIVAL_COLUMN)),
             "completed": False,
-        }
-
-    if is_nonempty(row.get(YARD_FACT_COLUMN)):
-        return {
+        },
+        {
+            "column": JAPAN_EXIT_FACT_COLUMN,
+            "name": "Автомобиль вышел из Японии и следует в Китай/Корею",
+            "date_label": "Фактическая дата выхода из Японии",
+            "completed": False,
+        },
+        {
+            "column": JAPAN_EXIT_PLAN_COLUMN,
             "name": "Ожидается выход из Японии",
             "date_label": "Плановая дата выхода из Японии",
-            "date": format_date(row.get(JAPAN_EXIT_PLAN_COLUMN)),
             "completed": False,
-        }
+        },
+        {
+            "column": YARD_FACT_COLUMN,
+            "name": "Автомобиль доставлен на ярд",
+            "date_label": "Фактическая дата доставки на ярд",
+            "completed": False,
+        },
+        {
+            "column": YARD_PLAN_COLUMN,
+            "name": "Ожидается доставка автомобиля на ярд",
+            "date_label": "Плановая дата доставки на ярд",
+            "completed": False,
+        },
+    ]
+
+    for stage in stage_checks:
+        value = row.get(stage["column"])
+        if is_nonempty(value):
+            return {
+                "name": stage["name"],
+                "date_label": stage["date_label"],
+                "date": format_date(value),
+                "completed": stage["completed"],
+            }
 
     return {
-        "name": "Ожидается доставка автомобиля на ярд",
-        "date_label": "Плановая дата доставки на ярд",
-        "date": format_date(row.get(YARD_PLAN_COLUMN)),
+        "name": "Этап перевозки уточняется",
+        "date_label": "Дата",
+        "date": "уточняется",
         "completed": False,
     }
 
@@ -688,11 +717,11 @@ def build_cars_keyboard(cars):
         model = str(car.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
         body = str(car.get(BODY_NUMBER_COLUMN, "")).strip()
         completed = is_nonempty(car.get(RELEASE_DATE_COLUMN))
-        prefix = "✅ " if completed else "🚗 "
-        text = f"{prefix}{model} / {body}"
+        suffix = " ✅" if completed else ""
+        text = f"{model} / {body}{suffix}"
 
         if len(text) > 60:
-            text = f"{prefix}{model[:24]}… / {body[-22:]}"
+            text = f"{model[:28]}… / {body[-22:]}{suffix}"
 
         buttons.append(
             [
