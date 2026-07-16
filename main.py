@@ -72,7 +72,7 @@ TRACKED_COLUMNS = {
     RUSSIA_ARRIVAL_PLAN_COLUMN: ("Плановая дата прибытия в Россию", "plan"),
     RUSSIA_ARRIVAL_FACT_COLUMN: ("Автомобиль прибыл в Россию", "fact"),
     RELEASE_DATE_COLUMN: ("Автомобиль выпущен", "fact"),
-    CONTAINER_LOADING_FACT_COLUMN: ("Автомобиль погружен в контейнер","fact"),
+    CONTAINER_LOADING_FACT_COLUMN: ("Автомобиль погружен","fact"),
 }
 
 # Этапы для ответа по кнопке «Уточнить место дислокации груза».
@@ -619,14 +619,14 @@ def get_current_stage(row):
     if is_nonempty(row.get(CONTAINER_LOADING_FACT_COLUMN)):
         return {
             "code": "loaded",
-            "name": "Автомобиль погружен в контейнер, ожидает отправку из Японии",
+            "name": "Автомобиль погружен, ожидает отправку из Японии",
             "completed": False,
         }
 
     if is_nonempty(row.get(YARD_FACT_COLUMN)):
         return {
             "code": "on_yard",
-            "name": "Автомобиль на ярде, ожидает погрузку в контейнер",
+            "name": "Автомобиль на ярде, ожидает погрузку",
             "completed": False,
         }
 
