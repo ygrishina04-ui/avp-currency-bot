@@ -49,6 +49,7 @@ BODY_NUMBER_COLUMN = "Номер кузова"
 
 YARD_PLAN_COLUMN = "ПЛАН дата доставки на ярд"
 YARD_FACT_COLUMN = "ФАКТ дата доставки на ярд"
+CONTAINER_LOADING_FACT_COLUMN = "ФАКТ дата погрузки"
 JAPAN_EXIT_PLAN_COLUMN = "ПЛАН выхода из Япония"
 JAPAN_EXIT_FACT_COLUMN = "ФАКТ выхода из Японии"
 CHINA_KOREA_ARRIVAL_COLUMN = "Дата прибытия в порт перегруза"
@@ -71,6 +72,7 @@ TRACKED_COLUMNS = {
     RUSSIA_ARRIVAL_PLAN_COLUMN: ("Плановая дата прибытия в Россию", "plan"),
     RUSSIA_ARRIVAL_FACT_COLUMN: ("Автомобиль прибыл в Россию", "fact"),
     RELEASE_DATE_COLUMN: ("Автомобиль выпущен", "fact"),
+    CONTAINER_LOADING_FACT_COLUMN: ("Автомобиль погружен в контейнер","fact"),
 }
 
 # Этапы для ответа по кнопке «Уточнить место дислокации груза».
@@ -614,10 +616,17 @@ def get_current_stage(row):
             "completed": False,
         }
 
+    if is_nonempty(row.get(CONTAINER_LOADING_FACT_COLUMN)):
+        return {
+            "code": "loaded",
+            "name": "Автомобиль погружен в контейнер, ожидает отправку из Японии",
+            "completed": False,
+        }
+
     if is_nonempty(row.get(YARD_FACT_COLUMN)):
         return {
             "code": "on_yard",
-            "name": "Автомобиль на ярде, ожидает отправку из Японии",
+            "name": "Автомобиль на ярде, ожидает погрузку в контейнер",
             "completed": False,
         }
 
