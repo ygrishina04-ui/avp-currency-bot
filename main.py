@@ -697,16 +697,8 @@ def build_car_history(row):
 
 
 def format_car_status(row):
-    model = (
-        str(row.get(CAR_MODEL_COLUMN, "")).strip()
-        or "Автомобиль"
-    )
-
-    body_number = (
-        str(row.get(BODY_NUMBER_COLUMN, "")).strip()
-        or "не указан"
-    )
-
+    model = str(row.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
+    body_number = str(row.get(BODY_NUMBER_COLUMN, "")).strip() or "не указан"
     stage = get_current_stage(row)
 
     text = (
@@ -715,25 +707,16 @@ def format_car_status(row):
         f"📍 Текущий статус: {stage['name']}"
     )
 
-    plan_lines = get_stage_plan_lines(
-        row,
-        stage["code"],
-    )
+    if stage["code"] == "loaded":
+        japan_exit_plan = format_date(
+            row.get(JAPAN_EXIT_PLAN_COLUMN)
+        )
 
-    if plan_lines:
-        text += "\n\n" + "\n".join(plan_lines)
-
-    if (
-        is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN))
-        or is_nonempty(row.get(RELEASE_DATE_COLUMN))
-    ):
-        history = build_car_history(row)
-
-        if history:
-            text += (
-                "\n\n🗓 Хронология перевозки:\n"
-                + "\n".join(history)
-            )
+        text += (
+            f"\n\n"
+            f"📅 Планируемая дата выхода из Японии: "
+            f"{japan_exit_plan}"
+        )
 
     return text
 
