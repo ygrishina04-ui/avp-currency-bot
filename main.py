@@ -26,6 +26,7 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
+TEST_BROADCAST_CHAT_ID = os.getenv("TEST_BROADCAST_CHAT_ID")
 
 CLIENTS_SHEET_NAME = os.getenv("JAPAN_CLIENTS_SHEET", "Клиенты")
 LOGISTICS_SHEET_NAME = os.getenv("JAPAN_LOGISTICS_SHEET", "Сверка 2.0")
@@ -1249,7 +1250,16 @@ def send_custom_broadcast(text):
     success = 0
     errors = 0
 
-    # Защита от дублей, если один chat_id каким-то образом повторится
+    # Тестовый режим:
+    # если в Render задан TEST_BROADCAST_CHAT_ID,
+    # рассылка идет только в этот чат.
+    if TEST_BROADCAST_CHAT_ID:
+        groups = [
+            group
+            for group in groups
+            if str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+        ]
+
     sent_chat_ids = set()
 
     for chat_id, title, mode, message_id in groups:
@@ -1257,8 +1267,6 @@ def send_custom_broadcast(text):
             continue
 
         try:
-            # Произвольная рассылка всегда отправляется новым сообщением.
-            # Закреп с курсом при этом не меняется.
             send_message(chat_id, text)
 
             sent_chat_ids.add(str(chat_id))
