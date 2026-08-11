@@ -104,6 +104,8 @@ STAGES = [
 ]
 
 waiting_for_rate = set()
+waiting_for_custom_broadcast = set()
+pending_custom_broadcast = {}
 web_app = Flask(__name__)
 
 _google_client = None
@@ -1238,6 +1240,44 @@ def get_groups_message():
 
     return text
 
+def send_custom_broadcast(text):
+    groups = get_broadcast_groups()
+
+    if not groups:
+        return 0, 0
+
+    success = 0
+    errors = 0
+
+    # Защита от дублей, если один chat_id каким-то образом повторится
+    sent_chat_ids = set()
+
+    for chat_id, title, mode, message_id in groups:
+        if str(chat_id) in sent_chat_ids:
+            continue
+
+        try:
+            # Произвольная рассылка всегда отправляется новым сообщением.
+            # Закреп с курсом при этом не меняется.
+            send_message(chat_id, text)
+
+            sent_chat_ids.add(str(chat_id))
+            success += 1
+
+            print(
+                f"Массовая рассылка отправлена: {title} ({chat_id})",
+                flush=True,
+            )
+
+        except Exception as exc:
+            errors += 1
+
+            print(
+                f"Ошибка массовой рассылки в {title} ({chat_id}): {exc}",
+                flush=True,
+            )
+
+    return success, errors
 
 def broadcast():
     groups = get_broadcast_groups()
@@ -1420,7 +1460,67 @@ def handle_message(data):
 
         send_message(chat_id, get_groups_message(), reply_markup)
         return
+    if text_lower == "/cancelbroadcast":
+    waiting_for_custom_broadcast.discard(chat_id)
+    pending_custom_broadcast.pop(chat_id, None)
 
+    send_message(
+        chat_id,
+        "Создание рассылки отменено ❌",
+        reply_markup,
+    )
+    return
+
+
+if chat_id in waiting_for_custom_broadcast:
+    if not private_chat or not admin:
+        waiting_for_custom_broadcast.discard(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+        return
+
+    if not text:
+        send_message(
+            chat_id,
+            "Пришлите текстовое сообщение для рассылки.",
+            reply_markup,
+        )
+        return
+
+    groups = get_broadcast_groups()
+    unique_chat_ids = {
+        str(group[0])
+        for group in groups
+    }
+
+    pending_custom_broadcast[chat_id] = text
+    waiting_for_custom_broadcast.discard(chat_id)
+
+    preview_keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Отправить",
+                    "callback_data": "custom_broadcast_confirm",
+                },
+                {
+                    "text": "❌ Отмена",
+                    "callback_data": "custom_broadcast_cancel",
+                },
+            ]
+        ]
+    }
+
+    send_message(
+        chat_id,
+        "📣 Предпросмотр рассылки:\n\n"
+        f"{text}\n\n"
+        f"──────────────\n"
+        f"Получателей: {len(unique_chat_ids)}\n\n"
+        f"Отправить это сообщение?",
+        reply_markup=preview_keyboard,
+    )
+    return
+    
     if chat_id in waiting_for_rate:
         if not private_chat or not admin:
             waiting_for_rate.discard(chat_id)
@@ -1521,27 +1621,113 @@ def handle_message(data):
         send_message(chat_id, get_chats_message(), reply_markup)
 
     elif text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
-        if not private_chat or not admin:
-            send_message(chat_id, "Нет доступа.", reply_markup)
-            return
+    if not private_chat or not admin:
+        send_message(chat_id, "Нет доступа.", reply_markup)
+        return
 
-        if has_today_rate():
-            broadcast()
-            send_message(chat_id, "Рассылка выполнена ✅", reply_markup)
-        else:
-            send_message(
-                chat_id,
-                "Курс за сегодня еще не внесен.",
-                reply_markup,
-            )
+    groups = get_broadcast_groups()
 
+    if not groups:
+        send_message(
+            chat_id,
+            "Нет групп, подключенных к рассылке.",
+            reply_markup,
+        )
+        return
+
+    waiting_for_custom_broadcast.add(chat_id)
+    pending_custom_broadcast.pop(chat_id, None)
+
+    send_message(
+        chat_id,
+        "📣 Создание новой рассылки\n\n"
+        "Отправьте следующим сообщением текст, "
+        "который нужно разослать всем подключенным группам.\n\n"
+        "Для отмены отправьте /cancelbroadcast",
+        reply_markup,
+    )
 
 def handle_update(data):
-    if data.get("callback_query"):
+    callback_query = data.get("callback_query")
+
+    if callback_query:
+        callback_data = callback_query.get("data", "")
+        callback_id = callback_query.get("id")
+        user_id = callback_query.get("from", {}).get("id")
+
+        message = callback_query.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+
+        # ====================================================
+        # ПОДТВЕРЖДЕНИЕ МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_confirm":
+            answer_callback_query(callback_id)
+
+            if not is_admin(user_id):
+                send_message(chat_id, "Нет доступа.")
+                return
+
+            broadcast_text = pending_custom_broadcast.get(chat_id)
+
+            if not broadcast_text:
+                send_message(
+                    chat_id,
+                    "Черновик рассылки не найден. Создайте рассылку заново.",
+                )
+                return
+
+            # Сначала удаляем черновик, чтобы двойное нажатие
+            # не запустило повторную рассылку
+            pending_custom_broadcast.pop(chat_id, None)
+
+            send_message(
+                chat_id,
+                "📤 Начинаю рассылку...",
+            )
+
+            success, errors = send_custom_broadcast(broadcast_text)
+
+            result_text = (
+                f"Рассылка завершена ✅\n\n"
+                f"Успешно отправлено: {success}"
+            )
+
+            if errors:
+                result_text += f"\nОшибок: {errors}"
+
+            send_message(chat_id, result_text)
+            return
+
+        # ====================================================
+        # ОТМЕНА МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_cancel":
+            answer_callback_query(callback_id)
+
+            pending_custom_broadcast.pop(chat_id, None)
+            waiting_for_custom_broadcast.discard(chat_id)
+
+            send_message(
+                chat_id,
+                "Рассылка отменена ❌",
+            )
+            return
+
+        # ====================================================
+        # ОСТАЛЬНЫЕ INLINE-КНОПКИ — АВТОМОБИЛИ
+        # ====================================================
+
         try:
-            handle_car_callback(data["callback_query"])
+            handle_car_callback(callback_query)
         except Exception as exc:
-            print(f"Ошибка callback_query: {exc}", flush=True)
+            print(
+                f"Ошибка callback_query: {exc}",
+                flush=True,
+            )
+
         return
 
     handle_message(data)
