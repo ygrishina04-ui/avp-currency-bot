@@ -1643,17 +1643,17 @@ if chat_id in waiting_for_custom_broadcast:
         )
         return
 
-    waiting_for_custom_broadcast.add(chat_id)
-    pending_custom_broadcast.pop(chat_id, None)
-
-    send_message(
-        chat_id,
-        "📣 Создание новой рассылки\n\n"
-        "Отправьте следующим сообщением текст, "
-        "который нужно разослать всем подключенным группам.\n\n"
-        "Для отмены отправьте /cancelbroadcast",
-        reply_markup,
-    )
+        waiting_for_custom_broadcast.add(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+    
+        send_message(
+            chat_id,
+            "📣 Создание новой рассылки\n\n"
+            "Отправьте следующим сообщением текст, "
+            "который нужно разослать всем подключенным группам.\n\n"
+            "Для отмены отправьте /cancelbroadcast",
+            reply_markup,
+        )
 
 def handle_update(data):
     callback_query = data.get("callback_query")
