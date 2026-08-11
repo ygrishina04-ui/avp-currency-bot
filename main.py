@@ -1468,66 +1468,69 @@ def handle_message(data):
 
         send_message(chat_id, get_groups_message(), reply_markup)
         return
-    if text_lower == "/cancelbroadcast":
+        
+        if text_lower == "/cancelbroadcast":
         waiting_for_custom_broadcast.discard(chat_id)
         pending_custom_broadcast.pop(chat_id, None)
 
-            send_message(
-                chat_id,
-                "Создание рассылки отменено ❌",
-                reply_markup,
-            )
-            return
-
-
-if chat_id in waiting_for_custom_broadcast:
-    if not private_chat or not admin:
-        waiting_for_custom_broadcast.discard(chat_id)
-        pending_custom_broadcast.pop(chat_id, None)
-        return
-
-    if not text:
         send_message(
             chat_id,
-            "Пришлите текстовое сообщение для рассылки.",
+            "Создание рассылки отменено ❌",
             reply_markup,
         )
         return
 
-    groups = get_broadcast_groups()
-    unique_chat_ids = {
-        str(group[0])
-        for group in groups
-    }
+    if chat_id in waiting_for_custom_broadcast:
+        if not private_chat or not admin:
+            waiting_for_custom_broadcast.discard(chat_id)
+            pending_custom_broadcast.pop(chat_id, None)
+            return
 
-    pending_custom_broadcast[chat_id] = text
-    waiting_for_custom_broadcast.discard(chat_id)
+        if not text:
+            send_message(
+                chat_id,
+                "Пришлите текстовое сообщение для рассылки.",
+                reply_markup,
+            )
+            return
 
-    preview_keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "✅ Отправить",
-                    "callback_data": "custom_broadcast_confirm",
-                },
-                {
-                    "text": "❌ Отмена",
-                    "callback_data": "custom_broadcast_cancel",
-                },
+        groups = get_broadcast_groups()
+
+        unique_chat_ids = {
+            str(group[0])
+            for group in groups
+        }
+
+        pending_custom_broadcast[chat_id] = text
+        waiting_for_custom_broadcast.discard(chat_id)
+
+        preview_keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Отправить",
+                        "callback_data": "custom_broadcast_confirm",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": "custom_broadcast_cancel",
+                    },
+                ]
             ]
-        ]
-    }
+        }
 
-    send_message(
-        chat_id,
-        "📣 Предпросмотр рассылки:\n\n"
-        f"{text}\n\n"
-        f"──────────────\n"
-        f"Получателей: {len(unique_chat_ids)}\n\n"
-        f"Отправить это сообщение?",
-        reply_markup=preview_keyboard,
-    )
-    return
+        send_message(
+            chat_id,
+            "📣 Предпросмотр рассылки:\n\n"
+            f"{text}\n\n"
+            "──────────────\n"
+            f"Получателей: {len(unique_chat_ids)}\n\n"
+            "Отправить это сообщение?",
+            reply_markup=preview_keyboard,
+        )
+        return
+
+    if chat_id in waiting_for_rate:
     
     if chat_id in waiting_for_rate:
         if not private_chat or not admin:
