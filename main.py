@@ -1469,15 +1469,15 @@ def handle_message(data):
         send_message(chat_id, get_groups_message(), reply_markup)
         return
     if text_lower == "/cancelbroadcast":
-    waiting_for_custom_broadcast.discard(chat_id)
-    pending_custom_broadcast.pop(chat_id, None)
+        waiting_for_custom_broadcast.discard(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
 
-    send_message(
-        chat_id,
-        "Создание рассылки отменено ❌",
-        reply_markup,
-    )
-    return
+            send_message(
+                chat_id,
+                "Создание рассылки отменено ❌",
+                reply_markup,
+            )
+            return
 
 
 if chat_id in waiting_for_custom_broadcast:
