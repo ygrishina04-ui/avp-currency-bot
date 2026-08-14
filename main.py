@@ -26,6 +26,8 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
+BROADCAST_GROUPS_SHEET_NAME = os.getenv("BROADCAST_GROUPS_SHEET_NAME", "BOT_ГРУППЫ")
+LOGISTICS_SNAPSHOT_SHEET_NAME = os.getenv("LOGISTICS_SNAPSHOT_SHEET_NAME", "BOT_СНИМКИ")
 TEST_BROADCAST_CHAT_ID = os.getenv("TEST_BROADCAST_CHAT_ID")
 
 CLIENTS_SHEET_NAME = os.getenv("JAPAN_CLIENTS_SHEET", "Клиенты")
@@ -111,8 +113,11 @@ web_app = Flask(__name__)
 
 _google_client = None
 _google_worksheet = None
+_broadcast_groups_worksheet = None
+_snapshot_worksheet = None
 _google_lock = threading.Lock()
 _rates_lock = threading.Lock()
+_storage_lock = threading.Lock()
 
 
 # ============================================================
@@ -278,38 +283,150 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def get_snapshot_value(car_key, column_name):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT value
-        FROM logistics_snapshot
-        WHERE car_key = ? AND column_name = ?
-        """,
-        (car_key, column_name),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return None if row is None else row[0]
+def get_storage_spreadsheet():
+    """Постоянное техническое хранилище бота в Google Sheets."""
+    if not GOOGLE_SPREADSHEET_ID:
+        raise RuntimeError("GOOGLE_SPREADSHEET_ID не задан")
+
+    return get_google_client().open_by_key(GOOGLE_SPREADSHEET_ID)
 
 
-def save_snapshot_value(car_key, column_name, value):
+def _get_or_create_worksheet(title, headers, rows=1000, cols=10):
+    spreadsheet = get_storage_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=title,
+            rows=rows,
+            cols=cols,
+        )
+
+    current_headers = worksheet.row_values(1)
+
+    if not current_headers:
+        worksheet.update(
+            values=[headers],
+            range_name=f"A1:{chr(64 + len(headers))}1",
+        )
+
+    return worksheet
+
+
+def get_broadcast_groups_worksheet():
+    global _broadcast_groups_worksheet
+
+    if _broadcast_groups_worksheet is not None:
+        return _broadcast_groups_worksheet
+
+    with _storage_lock:
+        if _broadcast_groups_worksheet is None:
+            _broadcast_groups_worksheet = _get_or_create_worksheet(
+                BROADCAST_GROUPS_SHEET_NAME,
+                [
+                    "Chat ID",
+                    "Название",
+                    "Режим",
+                    "Message ID",
+                    "Добавлено",
+                ],
+                rows=500,
+                cols=5,
+            )
+
+    return _broadcast_groups_worksheet
+
+
+def get_snapshot_worksheet():
+    global _snapshot_worksheet
+
+    if _snapshot_worksheet is not None:
+        return _snapshot_worksheet
+
+    with _storage_lock:
+        if _snapshot_worksheet is None:
+            _snapshot_worksheet = _get_or_create_worksheet(
+                LOGISTICS_SNAPSHOT_SHEET_NAME,
+                [
+                    "Car Key",
+                    "Колонка",
+                    "Значение",
+                    "Обновлено",
+                ],
+                rows=5000,
+                cols=4,
+            )
+
+    return _snapshot_worksheet
+
+
+def load_snapshot_state():
+    """Читает постоянный снимок дат из Google Sheets."""
+    worksheet = get_snapshot_worksheet()
+    values = worksheet.get_all_values()
+
+    snapshot = {}
+    row_numbers = {}
+
+    for row_number, row in enumerate(values[1:], start=2):
+        if len(row) < 2:
+            continue
+
+        car_key = str(row[0]).strip()
+        column_name = str(row[1]).strip()
+
+        if not car_key or not column_name:
+            continue
+
+        value = str(row[2]).strip() if len(row) > 2 else ""
+        key = (car_key, column_name)
+
+        snapshot[key] = value
+        row_numbers[key] = row_number
+
+    return snapshot, row_numbers
+
+
+def initialize_snapshot_in_google(logistics_rows):
+    """Первичная инициализация без рассылки старых изменений."""
+    worksheet = get_snapshot_worksheet()
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO logistics_snapshot (car_key, column_name, value, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(car_key, column_name)
-        DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        """,
-        (car_key, column_name, value, now),
+    rows = [[
+        "Car Key",
+        "Колонка",
+        "Значение",
+        "Обновлено",
+    ]]
+
+    for row in logistics_rows:
+        car_key = make_car_key(row)
+
+        if car_key == "|":
+            continue
+
+        for column_name in TRACKED_COLUMNS:
+            rows.append([
+                car_key,
+                column_name,
+                str(row.get(column_name, "")).strip(),
+                now,
+            ])
+
+    worksheet.clear()
+
+    if rows:
+        worksheet.update(
+            values=rows,
+            range_name=f"A1:D{len(rows)}",
+        )
+
+    print(
+        f"BOT_СНИМКИ инициализирован: {max(len(rows) - 1, 0)} значений. "
+        "Старые изменения не рассылаются.",
+        flush=True,
     )
-    conn.commit()
-    conn.close()
 
 
 # ============================================================
@@ -935,32 +1052,23 @@ def build_date_notification(row, column_name, old_value, new_value):
     )
 
 
-def initialize_logistics_snapshot(logistics_rows):
-    saved = 0
-
-    for row in logistics_rows:
-        car_key = make_car_key(row)
-
-        if car_key == "|":
-            continue
-
-        for column_name in TRACKED_COLUMNS:
-            new_value = str(row.get(column_name, "")).strip()
-            previous = get_snapshot_value(car_key, column_name)
-
-            if previous is None:
-                save_snapshot_value(car_key, column_name, new_value)
-                saved += 1
-
-    return saved
-
-
 def check_logistics_updates():
     clients_rows = get_clients_rows()
     logistics_rows = get_logistics_rows()
 
-    # Первый запуск по каждому автомобилю/полю только сохраняет значения.
-    initialize_logistics_snapshot(logistics_rows)
+    snapshot, row_numbers = load_snapshot_state()
+
+    # Первый запуск после перехода на Google-хранилище:
+    # фиксируем текущее состояние и ничего старого не рассылаем.
+    if not snapshot:
+        initialize_snapshot_in_google(logistics_rows)
+        return
+
+    worksheet = get_snapshot_worksheet()
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    rows_to_append = []
+    batch_updates = []
 
     for row in logistics_rows:
         client_name = str(row.get(CLIENT_COLUMN, "")).strip()
@@ -973,18 +1081,40 @@ def check_logistics_updates():
         telegram_ids = None
 
         for column_name in TRACKED_COLUMNS:
+            key = (car_key, column_name)
             new_value = str(row.get(column_name, "")).strip()
-            old_value = get_snapshot_value(car_key, column_name)
 
-            if old_value is None:
-                save_snapshot_value(car_key, column_name, new_value)
+            # Новая машина или новая колонка — принимаем как исходное состояние.
+            if key not in snapshot:
+                rows_to_append.append([
+                    car_key,
+                    column_name,
+                    new_value,
+                    now,
+                ])
+                snapshot[key] = new_value
                 continue
+
+            old_value = snapshot[key]
 
             if new_value == old_value:
                 continue
 
-            # Снимок обновляем всегда, включая очистку значения.
-            save_snapshot_value(car_key, column_name, new_value)
+            snapshot[key] = new_value
+            existing_row_number = row_numbers.get(key)
+
+            if existing_row_number:
+                batch_updates.append({
+                    "range": f"C{existing_row_number}:D{existing_row_number}",
+                    "values": [[new_value, now]],
+                })
+            else:
+                rows_to_append.append([
+                    car_key,
+                    column_name,
+                    new_value,
+                    now,
+                ])
 
             # Очистку/удаление даты клиенту не показываем.
             if not new_value:
@@ -1023,6 +1153,15 @@ def check_logistics_updates():
                         flush=True,
                     )
 
+    if batch_updates:
+        worksheet.batch_update(batch_updates)
+
+    if rows_to_append:
+        worksheet.append_rows(
+            rows_to_append,
+            value_input_option="USER_ENTERED",
+        )
+
 
 def logistics_watch_loop():
     while True:
@@ -1038,56 +1177,104 @@ def logistics_watch_loop():
 # СОХРАНЁННАЯ ЛОГИКА ВАЛЮТНОГО БОТА
 # ============================================================
 
+def _find_broadcast_group_row(chat_id):
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+    target = str(chat_id).strip()
+
+    for row_number, row in enumerate(values[1:], start=2):
+        if row and str(row[0]).strip() == target:
+            return row_number, row
+
+    return None, None
+
+
 def add_broadcast_group(chat_id, title, mode="send", message_id=None):
+    worksheet = get_broadcast_groups_worksheet()
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO broadcast_groups
-        (chat_id, title, created_at, mode, message_id)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (str(chat_id), title, now, mode, message_id),
-    )
-    conn.commit()
-    conn.close()
+
+    row_number, _ = _find_broadcast_group_row(chat_id)
+
+    values = [[
+        str(chat_id),
+        str(title or ""),
+        str(mode or "send"),
+        "" if message_id is None else str(message_id),
+        now,
+    ]]
+
+    if row_number:
+        worksheet.update(
+            values=values,
+            range_name=f"A{row_number}:E{row_number}",
+        )
+    else:
+        worksheet.append_row(
+            values[0],
+            value_input_option="USER_ENTERED",
+        )
 
 
 def update_group_message_id(chat_id, message_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE broadcast_groups SET message_id = ? WHERE chat_id = ?",
-        (message_id, str(chat_id)),
+    worksheet = get_broadcast_groups_worksheet()
+    row_number, row = _find_broadcast_group_row(chat_id)
+
+    if not row_number:
+        return
+
+    while len(row) < 5:
+        row.append("")
+
+    row[3] = str(message_id)
+
+    worksheet.update(
+        values=[row[:5]],
+        range_name=f"A{row_number}:E{row_number}",
     )
-    conn.commit()
-    conn.close()
 
 
 def remove_broadcast_group(chat_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM broadcast_groups WHERE chat_id = ?",
-        (str(chat_id),),
-    )
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return deleted > 0
+    worksheet = get_broadcast_groups_worksheet()
+    row_number, _ = _find_broadcast_group_row(chat_id)
+
+    if not row_number:
+        return False
+
+    worksheet.delete_rows(row_number)
+    return True
 
 
 def get_broadcast_groups():
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT chat_id, title, mode, message_id
-        FROM broadcast_groups
-        ORDER BY title
-    """)
-    rows = cur.fetchall()
-    conn.close()
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+
+    rows = []
+
+    for row in values[1:]:
+        if not row:
+            continue
+
+        chat_id = str(row[0]).strip() if len(row) > 0 else ""
+        if not chat_id:
+            continue
+
+        title = str(row[1]).strip() if len(row) > 1 else ""
+        mode = str(row[2]).strip() if len(row) > 2 else "send"
+        message_id_raw = str(row[3]).strip() if len(row) > 3 else ""
+
+        try:
+            message_id = int(message_id_raw) if message_id_raw else None
+        except ValueError:
+            message_id = None
+
+        rows.append((
+            chat_id,
+            title,
+            mode or "send",
+            message_id,
+        ))
+
+    rows.sort(key=lambda item: (item[1] or "").casefold())
     return rows
 
 
@@ -1817,6 +2004,13 @@ def main():
         raise RuntimeError("BOT_TOKEN не задан")
 
     init_db()
+
+    try:
+        get_broadcast_groups_worksheet()
+        get_snapshot_worksheet()
+        print("Постоянное Google-хранилище бота подключено ✅", flush=True)
+    except Exception as exc:
+        print(f"Ошибка подключения Google-хранилища бота: {exc}", flush=True)
 
     try:
         get_rates_worksheet()
