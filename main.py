@@ -26,7 +26,7 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
-BROADCAST_GROUPS_SHEET_NAME = os.getenv("BROADCAST_GROUPS_SHEET_NAME", "BOT_ГРУППЫ")
+BROADCAST_GROUPS_SHEET_NAME = os.getenv("BROADCAST_GROUPS_SHEET_NAME", "BOT_РАССЫЛКА")
 LOGISTICS_SNAPSHOT_SHEET_NAME = os.getenv("LOGISTICS_SNAPSHOT_SHEET_NAME", "BOT_СНИМКИ")
 TEST_BROADCAST_CHAT_ID = os.getenv("TEST_BROADCAST_CHAT_ID")
 
@@ -315,6 +315,12 @@ def _get_or_create_worksheet(title, headers, rows=1000, cols=10):
 
 
 def get_broadcast_groups_worksheet():
+    """
+    Реестр рассылки хранится в JAPAN_SPREADSHEET_ID на листе BOT_РАССЫЛКА.
+
+    Колонки:
+    Клиент | Chat ID | Активен | Режим | Message ID | Обновлено
+    """
     global _broadcast_groups_worksheet
 
     if _broadcast_groups_worksheet is not None:
@@ -322,18 +328,46 @@ def get_broadcast_groups_worksheet():
 
     with _storage_lock:
         if _broadcast_groups_worksheet is None:
-            _broadcast_groups_worksheet = _get_or_create_worksheet(
-                BROADCAST_GROUPS_SHEET_NAME,
-                [
-                    "Chat ID",
-                    "Название",
-                    "Режим",
-                    "Message ID",
-                    "Добавлено",
-                ],
-                rows=500,
-                cols=5,
-            )
+            spreadsheet = get_japan_spreadsheet()
+
+            try:
+                worksheet = spreadsheet.worksheet(
+                    BROADCAST_GROUPS_SHEET_NAME
+                )
+            except gspread.WorksheetNotFound:
+                worksheet = spreadsheet.add_worksheet(
+                    title=BROADCAST_GROUPS_SHEET_NAME,
+                    rows=1000,
+                    cols=6,
+                )
+
+            headers = [
+                "Клиент",
+                "Chat ID",
+                "Активен",
+                "Режим",
+                "Message ID",
+                "Обновлено",
+            ]
+
+            current_headers = worksheet.row_values(1)
+
+            if not current_headers:
+                worksheet.update(
+                    values=[headers],
+                    range_name="A1:F1",
+                )
+            elif current_headers[:6] != headers:
+                # Не перезаписываем существующие данные автоматически.
+                # Если лист уже есть в другом формате — создаём правильные заголовки
+                # только если ниже нет данных.
+                if len(worksheet.get_all_values()) <= 1:
+                    worksheet.update(
+                        values=[headers],
+                        range_name="A1:F1",
+                    )
+
+            _broadcast_groups_worksheet = worksheet
 
     return _broadcast_groups_worksheet
 
@@ -1177,27 +1211,224 @@ def logistics_watch_loop():
 # СОХРАНЁННАЯ ЛОГИКА ВАЛЮТНОГО БОТА
 # ============================================================
 
+def is_broadcast_active(value):
+    normalized = str(value or "").strip().casefold()
+
+    return normalized in {
+        "да",
+        "активен",
+        "активно",
+        "active",
+        "yes",
+        "true",
+        "1",
+        "✅",
+        "+",
+    }
+
+
 def _find_broadcast_group_row(chat_id):
     worksheet = get_broadcast_groups_worksheet()
     values = worksheet.get_all_values()
-    target = str(chat_id).strip()
+    target = normalize_telegram_id(chat_id)
 
     for row_number, row in enumerate(values[1:], start=2):
-        if row and str(row[0]).strip() == target:
+        row_chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        if row_chat_id == target:
             return row_number, row
 
     return None, None
 
 
+def migrate_old_broadcast_groups():
+    """
+    Один раз подтягивает старые записи из BOT_ГРУППЫ
+    в GOOGLE_SPREADSHEET_ID и отмечает их активными в BOT_РАССЫЛКА.
+
+    Старый лист не удаляется и не изменяется.
+    """
+    if not GOOGLE_SPREADSHEET_ID:
+        return 0
+
+    try:
+        old_spreadsheet = get_google_client().open_by_key(
+            GOOGLE_SPREADSHEET_ID
+        )
+
+        try:
+            old_worksheet = old_spreadsheet.worksheet("BOT_ГРУППЫ")
+        except gspread.WorksheetNotFound:
+            return 0
+
+        old_values = old_worksheet.get_all_values()
+
+        if len(old_values) <= 1:
+            return 0
+
+        registry = get_broadcast_groups_worksheet()
+        registry_values = registry.get_all_values()
+
+        existing_ids = {
+            normalize_telegram_id(row[1])
+            for row in registry_values[1:]
+            if len(row) > 1 and normalize_telegram_id(row[1])
+        }
+
+        now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+        rows_to_append = []
+
+        # Старый формат:
+        # Chat ID | Название | Режим | Message ID | Добавлено
+        for row in old_values[1:]:
+            old_chat_id = normalize_telegram_id(
+                row[0] if len(row) > 0 else ""
+            )
+
+            if not old_chat_id or old_chat_id in existing_ids:
+                continue
+
+            old_title = str(
+                row[1] if len(row) > 1 else ""
+            ).strip()
+
+            old_mode = str(
+                row[2] if len(row) > 2 else "send"
+            ).strip() or "send"
+
+            old_message_id = str(
+                row[3] if len(row) > 3 else ""
+            ).strip()
+
+            rows_to_append.append([
+                old_title,
+                old_chat_id,
+                "ДА",
+                old_mode,
+                old_message_id,
+                now,
+            ])
+
+            existing_ids.add(old_chat_id)
+
+        if rows_to_append:
+            registry.append_rows(
+                rows_to_append,
+                value_input_option="USER_ENTERED",
+            )
+
+        return len(rows_to_append)
+
+    except Exception as exc:
+        print(
+            f"Ошибка миграции старого BOT_ГРУППЫ: {exc}",
+            flush=True,
+        )
+        return 0
+
+
+def sync_broadcast_registry_from_clients():
+    """
+    Добавляет в BOT_РАССЫЛКА всех клиентов из листа «Клиенты».
+
+    Новые строки создаются как НЕАКТИВНЫЕ, чтобы случайно не отправить
+    рассылку всем клиентам. Уже выставленный статус не изменяется.
+    """
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+
+    existing_by_id = {}
+
+    for row_number, row in enumerate(values[1:], start=2):
+        chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        if chat_id:
+            existing_by_id[chat_id] = (row_number, row)
+
+    clients_rows = get_clients_rows()
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    rows_to_append = []
+    updates = []
+
+    for client_row in clients_rows:
+        client_name = str(
+            client_row.get(CLIENT_COLUMN, "")
+        ).strip()
+
+        chat_id = normalize_telegram_id(
+            client_row.get(TELEGRAM_ID_COLUMN, "")
+        )
+
+        if not client_name or not chat_id:
+            continue
+
+        existing = existing_by_id.get(chat_id)
+
+        if existing:
+            row_number, row = existing
+
+            # Если название клиента поменялось/было пустое — обновляем только его.
+            current_name = str(
+                row[0] if len(row) > 0 else ""
+            ).strip()
+
+            if current_name != client_name:
+                updates.append({
+                    "range": f"A{row_number}",
+                    "values": [[client_name]],
+                })
+
+            continue
+
+        rows_to_append.append([
+            client_name,
+            chat_id,
+            "НЕТ",
+            "send",
+            "",
+            now,
+        ])
+
+        existing_by_id[chat_id] = (None, rows_to_append[-1])
+
+    if updates:
+        worksheet.batch_update(updates)
+
+    if rows_to_append:
+        worksheet.append_rows(
+            rows_to_append,
+            value_input_option="USER_ENTERED",
+        )
+
+    if rows_to_append:
+        print(
+            f"BOT_РАССЫЛКА: автоматически добавлено "
+            f"{len(rows_to_append)} новых чатов из листа «Клиенты»",
+            flush=True,
+        )
+
+    return len(rows_to_append)
+
+
 def add_broadcast_group(chat_id, title, mode="send", message_id=None):
+    """
+    Команда /addgroup остаётся для совместимости,
+    но теперь просто создаёт/активирует строку в BOT_РАССЫЛКА.
+    """
     worksheet = get_broadcast_groups_worksheet()
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
-    row_number, _ = _find_broadcast_group_row(chat_id)
+    row_number, row = _find_broadcast_group_row(chat_id)
 
     values = [[
-        str(chat_id),
         str(title or ""),
+        normalize_telegram_id(chat_id),
+        "ДА",
         str(mode or "send"),
         "" if message_id is None else str(message_id),
         now,
@@ -1206,7 +1437,7 @@ def add_broadcast_group(chat_id, title, mode="send", message_id=None):
     if row_number:
         worksheet.update(
             values=values,
-            range_name=f"A{row_number}:E{row_number}",
+            range_name=f"A{row_number}:F{row_number}",
         )
     else:
         worksheet.append_row(
@@ -1222,29 +1453,48 @@ def update_group_message_id(chat_id, message_id):
     if not row_number:
         return
 
-    while len(row) < 5:
+    while len(row) < 6:
         row.append("")
 
-    row[3] = str(message_id)
+    row[4] = str(message_id)
+    row[5] = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
     worksheet.update(
-        values=[row[:5]],
-        range_name=f"A{row_number}:E{row_number}",
+        values=[row[:6]],
+        range_name=f"A{row_number}:F{row_number}",
     )
 
 
 def remove_broadcast_group(chat_id):
+    """
+    Ничего не удаляем физически.
+    /removegroup только ставит Активен = НЕТ.
+    """
     worksheet = get_broadcast_groups_worksheet()
-    row_number, _ = _find_broadcast_group_row(chat_id)
+    row_number, row = _find_broadcast_group_row(chat_id)
 
     if not row_number:
         return False
 
-    worksheet.delete_rows(row_number)
+    worksheet.update(
+        values=[["НЕТ"]],
+        range_name=f"C{row_number}",
+    )
+    worksheet.update(
+        values=[[datetime.now(ZoneInfo(TIMEZONE)).isoformat()]],
+        range_name=f"F{row_number}",
+    )
+
     return True
 
 
 def get_broadcast_groups():
+    """
+    Возвращает ТОЛЬКО строки, где Активен = ДА/АКТИВЕН/✅ и т.п.
+    Это единственный источник получателей рассылки.
+    """
+    sync_broadcast_registry_from_clients()
+
     worksheet = get_broadcast_groups_worksheet()
     values = worksheet.get_all_values()
 
@@ -1254,28 +1504,71 @@ def get_broadcast_groups():
         if not row:
             continue
 
-        chat_id = str(row[0]).strip() if len(row) > 0 else ""
-        if not chat_id:
+        title = str(
+            row[0] if len(row) > 0 else ""
+        ).strip()
+
+        chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        active = str(
+            row[2] if len(row) > 2 else ""
+        ).strip()
+
+        mode = str(
+            row[3] if len(row) > 3 else "send"
+        ).strip() or "send"
+
+        message_id_raw = str(
+            row[4] if len(row) > 4 else ""
+        ).strip()
+
+        if not chat_id or not is_broadcast_active(active):
             continue
 
-        title = str(row[1]).strip() if len(row) > 1 else ""
-        mode = str(row[2]).strip() if len(row) > 2 else "send"
-        message_id_raw = str(row[3]).strip() if len(row) > 3 else ""
-
         try:
-            message_id = int(message_id_raw) if message_id_raw else None
+            message_id = (
+                int(message_id_raw)
+                if message_id_raw
+                else None
+            )
         except ValueError:
             message_id = None
 
         rows.append((
             chat_id,
             title,
-            mode or "send",
+            mode,
             message_id,
         ))
 
-    rows.sort(key=lambda item: (item[1] or "").casefold())
+    rows.sort(
+        key=lambda item: (item[1] or "").casefold()
+    )
+
     return rows
+
+
+def log_broadcast_groups_count(prefix="BOT_РАССЫЛКА"):
+    try:
+        groups = get_broadcast_groups()
+        count = len(groups)
+
+        print(
+            f"{prefix}: активно {count} чатов",
+            flush=True,
+        )
+
+        return count
+
+    except Exception as exc:
+        print(
+            f"{prefix}: ошибка чтения списка чатов: {exc}",
+            flush=True,
+        )
+
+        return 0
 
 
 def parse_sheet_number(value):
@@ -1410,28 +1703,48 @@ def get_groups_message():
 
     if not rows:
         return (
-            "Группы рассылки пока не добавлены.\n\n"
-            "В группе можно использовать:\n"
-            "/addgroup — обычная рассылка\n"
-            "/addpin — закрепленное обновляемое сообщение"
+            "📣 Сейчас нет активных чатов для рассылки.\n\n"
+            "Управление рассылкой выполняется на листе "
+            f"«{BROADCAST_GROUPS_SHEET_NAME}».\n"
+            "Чтобы включить чат, поставьте в колонке «Активен» значение «ДА»."
         )
 
-    text = "📣 Группы рассылки:\n\n"
-    for index, (chat_id, title, mode, message_id) in enumerate(rows, start=1):
-        mode_text = "закреп" if mode == "pin" else "обычная рассылка"
-        pin_text = f"\nMessage ID: {message_id}" if message_id else ""
+    text = (
+        f"📣 Активные чаты рассылки: {len(rows)}\n\n"
+    )
+
+    for index, (chat_id, title, mode, message_id) in enumerate(
+        rows,
+        start=1,
+    ):
+        mode_text = (
+            "закреп"
+            if mode == "pin"
+            else "обычная рассылка"
+        )
+
         text += (
             f"{index}. {title}\n"
-            f"Режим: {mode_text}\n"
-            f"ID: {chat_id}{pin_text}\n\n"
+            f"ID: {chat_id}\n"
+            f"Режим: {mode_text}\n\n"
         )
 
     return text
 
+
 def send_custom_broadcast(text):
     groups = get_broadcast_groups()
 
+    print(
+        f"Ручная рассылка: найдено {len(groups)} чатов",
+        flush=True,
+    )
+
     if not groups:
+        print(
+            "Ручная рассылка отменена: BOT_ГРУППЫ пуст",
+            flush=True,
+        )
         return 0, 0
 
     success = 0
@@ -1477,6 +1790,21 @@ def send_custom_broadcast(text):
 def broadcast():
     groups = get_broadcast_groups()
 
+    print(
+        f"Автоматическая рассылка курса: найдено {len(groups)} чатов",
+        flush=True,
+    )
+
+    if not groups:
+        print(
+            "Автоматическая рассылка курса отменена: BOT_ГРУППЫ пуст",
+            flush=True,
+        )
+        return 0, 0
+
+    success = 0
+    errors = 0
+
     for chat_id, title, mode, message_id in groups:
         try:
             if mode == "pin":
@@ -1498,523 +1826,25 @@ def broadcast():
             else:
                 send_message(chat_id, build_message())
 
-            print(f"Рассылка выполнена: {title}", flush=True)
-        except Exception as exc:
-            print(f"Ошибка отправки в {title}: {exc}", flush=True)
-
-
-def auto_broadcast_loop():
-    last_sent_date = None
-
-    while True:
-        try:
-            now = datetime.now(ZoneInfo(TIMEZONE))
-
-            if now.hour >= 11:
-                today = now.strftime("%Y-%m-%d")
-
-                if last_sent_date != today:
-                    if has_today_rate():
-                        print(
-                            f"Запускаю автоматическую рассылку курса за {today}",
-                            flush=True,
-                        )
-
-                        broadcast()
-                        last_sent_date = today
-
-                        print(
-                            f"Автоматическая рассылка за {today} завершена",
-                            flush=True,
-                        )
-
-        except Exception as exc:
+            success += 1
             print(
-                f"Ошибка автоматической рассылки курса: {exc}",
+                f"Рассылка выполнена: {title} ({chat_id})",
                 flush=True,
             )
 
-        time.sleep(60)
+        except Exception as exc:
+            errors += 1
+            print(
+                f"Ошибка отправки в {title} ({chat_id}): {exc}",
+                flush=True,
+            )
 
-
-def parse_rates_from_text(text):
-    clean_text = text.replace(",", ".")
-    numbers = re.findall(r"\d+(?:\.\d+)?", clean_text)
-
-    if len(numbers) < 2:
-        return None
-
-    return {
-        "usd_rub": float(numbers[0]),
-        "jpy_rub": float(numbers[1]),
-    }
-
-
-# ============================================================
-# ОБРАБОТКА ОБНОВЛЕНИЙ TELEGRAM
-# ============================================================
-
-def handle_message(data):
-    message = data.get("message")
-    if not message:
-        return
-
-    chat = message.get("chat", {})
-    user = message.get("from", {})
-
-    chat_id = chat.get("id")
-    user_id = user.get("id")
-    text = message.get("text", "").strip()
-    text_lower = text.lower()
-
-    title = (
-        chat.get("title")
-        or chat.get("first_name")
-        or chat.get("username")
-        or "Личный чат"
+    print(
+        f"Автоматическая рассылка завершена: успешно {success}, ошибок {errors}",
+        flush=True,
     )
+    return success, errors
 
-    save_chat(chat_id, title)
-
-    private_chat = is_private_chat(chat)
-    admin = is_admin(user_id)
-    reply_markup = get_keyboard(chat, user_id)
-
-    if text_lower == "/chatid":
-        send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
-        return
-
-    if text_lower in ["/debugcars", "/debugавто"]:
-        if not private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна только администратору.",
-                reply_markup,
-            )
-            return
-
-        try:
-            send_message(
-                chat_id,
-                build_debug_cars_message(user_id),
-                reply_markup,
-            )
-        except Exception as exc:
-            send_message(
-                chat_id,
-                f"DEBUG ERROR: {exc}",
-                reply_markup,
-            )
-        return
-
-    if text_lower in [
-        "🚗 уточнить место дислокации груза",
-        "уточнить место дислокации груза",
-        "/cars",
-        "/авто",
-    ]:
-        try:
-            access_id = user_id if private_chat else chat_id
-            show_client_cars(chat_id, access_id)
-        except Exception as exc:
-            print(f"Ошибка получения автомобилей: {exc}", flush=True)
-            send_message(
-                chat_id,
-                "Не удалось получить данные по автомобилям. "
-                "Попробуйте повторить запрос немного позже.",
-                reply_markup,
-            )
-        return
-
-    if text_lower == "/addgroup":
-        if private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна администратору в группе.",
-                reply_markup,
-            )
-            return
-
-        add_broadcast_group(chat_id, title, mode="send")
-        send_message(
-            chat_id,
-            "✅ Группа добавлена в рассылку.",
-            reply_markup,
-        )
-        return
-
-    if text_lower == "/addpin":
-        if private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна администратору в группе.",
-                reply_markup,
-            )
-            return
-
-        add_broadcast_group(chat_id, title, mode="pin", message_id=None)
-        sent = send_message(chat_id, build_message())
-        message_id = sent["result"]["message_id"]
-        pin_message(chat_id, message_id)
-        update_group_message_id(chat_id, message_id)
-        return
-
-    if text_lower == "/removegroup":
-        if private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна администратору в группе.",
-                reply_markup,
-            )
-            return
-
-        removed = remove_broadcast_group(chat_id)
-        send_message(
-            chat_id,
-            "❌ Группа удалена из рассылки."
-            if removed
-            else "Этой группы не было в списке.",
-            reply_markup,
-        )
-        return
-
-    if text_lower == "/groups":
-        if not private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна только администратору.",
-                reply_markup,
-            )
-            return
-
-        send_message(chat_id, get_groups_message(), reply_markup)
-        return
-
-    if text_lower == "/cancelbroadcast":
-        waiting_for_custom_broadcast.discard(chat_id)
-        pending_custom_broadcast.pop(chat_id, None)
-        send_message(
-            chat_id,
-            "Создание рассылки отменено ❌",
-            reply_markup,
-        )
-        return
-
-    if chat_id in waiting_for_custom_broadcast:
-        if not private_chat or not admin:
-            waiting_for_custom_broadcast.discard(chat_id)
-            pending_custom_broadcast.pop(chat_id, None)
-            return
-
-        if not text:
-            send_message(
-                chat_id,
-                "Пришлите текстовое сообщение для рассылки.",
-                reply_markup,
-            )
-            return
-
-        groups = get_broadcast_groups()
-        unique_chat_ids = {str(group[0]) for group in groups}
-
-        if TEST_BROADCAST_CHAT_ID:
-            preview_count = sum(
-                1
-                for group in groups
-                if str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
-            )
-            preview_mode = "\n🧪 Тестовый режим: отправка только в тестовый чат."
-        else:
-            preview_count = len(unique_chat_ids)
-            preview_mode = ""
-
-        pending_custom_broadcast[chat_id] = text
-        waiting_for_custom_broadcast.discard(chat_id)
-
-        preview_keyboard = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "✅ Отправить",
-                        "callback_data": "custom_broadcast_confirm",
-                    },
-                    {
-                        "text": "❌ Отмена",
-                        "callback_data": "custom_broadcast_cancel",
-                    },
-                ]
-            ]
-        }
-
-        send_message(
-            chat_id,
-            "📣 Предпросмотр рассылки:\n\n"
-            f"{text}\n\n"
-            "──────────────\n"
-            f"Получателей: {preview_count}"
-            f"{preview_mode}\n\n"
-            "Отправить это сообщение?",
-            reply_markup=preview_keyboard,
-        )
-        return
-
-    if chat_id in waiting_for_rate:
-        if not private_chat or not admin:
-            waiting_for_rate.discard(chat_id)
-            return
-
-        rates = parse_rates_from_text(text)
-
-        if not rates:
-            send_message(
-                chat_id,
-                "Не удалось распознать курсы.\n\nПример:\n76,80\n48,30",
-                reply_markup,
-            )
-            return
-
-        save_rate(rates["usd_rub"], rates["jpy_rub"])
-        waiting_for_rate.discard(chat_id)
-        send_message(
-            chat_id,
-            "Курсы сохранены ✅\n\n" + build_message(),
-            reply_markup,
-        )
-        return
-
-    if text_lower in ["/start", "старт"]:
-        if private_chat:
-            send_message(
-                chat_id,
-                "Бот запущен ✅\n\nВыберите действие в меню:",
-                reply_markup,
-            )
-        else:
-            send_message(
-                chat_id,
-                "Бот запущен ✅\n\nВ группе доступна команда /курс",
-                reply_markup,
-            )
-        return
-
-    if text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
-        send_message(chat_id, build_message(), reply_markup)
-        return
-
-    if text_lower in ["➕ внести курс", "внести курс"]:
-        if not private_chat or not admin:
-            send_message(
-                chat_id,
-                "Команда доступна только администратору.",
-                reply_markup,
-            )
-            return
-
-        waiting_for_rate.add(chat_id)
-        send_message(
-            chat_id,
-            "Введите два курса:\n\n76,80\n48,30\n\n"
-            "1-я строка — USD/RUB\n2-я строка — JPY/RUB",
-            reply_markup,
-        )
-        return
-
-    if text_lower.startswith("/addrate"):
-        if not private_chat or not admin:
-            send_message(chat_id, "Нет доступа.", reply_markup)
-            return
-
-        rates = parse_rates_from_text(text)
-
-        if not rates:
-            send_message(
-                chat_id,
-                "Используйте: /addrate 76,80 48,30",
-                reply_markup,
-            )
-            return
-
-        save_rate(rates["usd_rub"], rates["jpy_rub"])
-        send_message(
-            chat_id,
-            "Курсы сохранены ✅\n\n" + build_message(),
-            reply_markup,
-        )
-        return
-
-    if text_lower in ["/status", "✅ статус", "статус"]:
-        if admin:
-            try:
-                get_japan_spreadsheet()
-                sheets_status = "Google Таблица подключена ✅"
-            except Exception as exc:
-                sheets_status = f"Ошибка Google Таблицы: {exc}"
-
-            send_message(
-                chat_id,
-                f"Бот работает ✅\n{sheets_status}",
-                reply_markup,
-            )
-        else:
-            send_message(chat_id, "Бот работает ✅", reply_markup)
-        return
-
-    if text_lower in ["/chats", "💬 чаты", "чаты"]:
-        if not private_chat or not admin:
-            send_message(chat_id, "Нет доступа.", reply_markup)
-            return
-
-        send_message(chat_id, get_chats_message(), reply_markup)
-        return
-
-    if text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
-        if not private_chat or not admin:
-            send_message(chat_id, "Нет доступа.", reply_markup)
-            return
-
-        groups = get_broadcast_groups()
-
-        if not groups:
-            send_message(
-                chat_id,
-                "Нет групп, подключенных к рассылке.",
-                reply_markup,
-            )
-            return
-
-        if TEST_BROADCAST_CHAT_ID:
-            test_group_found = any(
-                str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
-                for group in groups
-            )
-
-            if not test_group_found:
-                send_message(
-                    chat_id,
-                    "🧪 Включён тестовый режим, но тестовый чат "
-                    "не найден среди групп рассылки.\n\n"
-                    "Проверь TEST_BROADCAST_CHAT_ID.",
-                    reply_markup,
-                )
-                return
-
-        waiting_for_custom_broadcast.add(chat_id)
-        pending_custom_broadcast.pop(chat_id, None)
-
-        send_message(
-            chat_id,
-            "📣 Создание новой рассылки\n\n"
-            "Отправьте следующим сообщением текст, "
-            "который нужно разослать всем подключенным группам.\n\n"
-            "Для отмены отправьте /cancelbroadcast",
-            reply_markup,
-        )
-        return
-
-def handle_update(data):
-    callback_query = data.get("callback_query")
-
-    if callback_query:
-        callback_data = callback_query.get("data", "")
-        callback_id = callback_query.get("id")
-        user_id = callback_query.get("from", {}).get("id")
-
-        message = callback_query.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-
-        # ====================================================
-        # ПОДТВЕРЖДЕНИЕ МАССОВОЙ РАССЫЛКИ
-        # ====================================================
-
-        if callback_data == "custom_broadcast_confirm":
-            answer_callback_query(callback_id)
-
-            if not is_admin(user_id):
-                send_message(chat_id, "Нет доступа.")
-                return
-
-            broadcast_text = pending_custom_broadcast.get(chat_id)
-
-            if not broadcast_text:
-                send_message(
-                    chat_id,
-                    "Черновик рассылки не найден. Создайте рассылку заново.",
-                )
-                return
-
-            # Сначала удаляем черновик, чтобы двойное нажатие
-            # не запустило повторную рассылку
-            pending_custom_broadcast.pop(chat_id, None)
-
-            send_message(
-                chat_id,
-                "📤 Начинаю рассылку...",
-            )
-
-            success, errors = send_custom_broadcast(broadcast_text)
-
-            result_text = (
-                f"Рассылка завершена ✅\n\n"
-                f"Успешно отправлено: {success}"
-            )
-
-            if errors:
-                result_text += f"\nОшибок: {errors}"
-
-            send_message(chat_id, result_text)
-            return
-
-        # ====================================================
-        # ОТМЕНА МАССОВОЙ РАССЫЛКИ
-        # ====================================================
-
-        if callback_data == "custom_broadcast_cancel":
-            answer_callback_query(callback_id)
-
-            pending_custom_broadcast.pop(chat_id, None)
-            waiting_for_custom_broadcast.discard(chat_id)
-
-            send_message(
-                chat_id,
-                "Рассылка отменена ❌",
-            )
-            return
-
-        # ====================================================
-        # ОСТАЛЬНЫЕ INLINE-КНОПКИ — АВТОМОБИЛИ
-        # ====================================================
-
-        try:
-            handle_car_callback(callback_query)
-        except Exception as exc:
-            print(
-                f"Ошибка callback_query: {exc}",
-                flush=True,
-            )
-
-        return
-
-    handle_message(data)
-
-
-# ============================================================
-# FLASK / RENDER
-# ============================================================
-
-@web_app.route("/", methods=["GET"])
-def home():
-    return "AVP Bot with Japan Logistics is running ✅"
-
-
-@web_app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        handle_update(data)
-    except Exception as exc:
-        print(f"Ошибка обработки webhook: {exc}", flush=True)
-
-    return "ok"
 
 
 def main():
@@ -2026,7 +1856,30 @@ def main():
     try:
         get_broadcast_groups_worksheet()
         get_snapshot_worksheet()
-        print("Постоянное Google-хранилище бота подключено ✅", flush=True)
+
+        migrated_count = migrate_old_broadcast_groups()
+        synced_count = sync_broadcast_registry_from_clients()
+
+        print(
+            "Постоянное Google-хранилище бота подключено ✅",
+            flush=True,
+        )
+
+        if migrated_count:
+            print(
+                f"BOT_РАССЫЛКА: перенесено {migrated_count} старых чатов "
+                "из BOT_ГРУППЫ",
+                flush=True,
+            )
+
+        if synced_count:
+            print(
+                f"BOT_РАССЫЛКА: добавлено {synced_count} чатов "
+                "из листа «Клиенты»",
+                flush=True,
+            )
+
+        log_broadcast_groups_count()
     except Exception as exc:
         print(f"Ошибка подключения Google-хранилища бота: {exc}", flush=True)
 
@@ -2063,3 +1916,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
