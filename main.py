@@ -1849,6 +1849,469 @@ def broadcast():
 
 
 
+def handle_message(data):
+    message = data.get("message")
+    if not message:
+        return
+
+    chat = message.get("chat", {})
+    user = message.get("from", {})
+
+    chat_id = chat.get("id")
+    user_id = user.get("id")
+    text = message.get("text", "").strip()
+    text_lower = text.lower()
+
+    title = (
+        chat.get("title")
+        or chat.get("first_name")
+        or chat.get("username")
+        or "Личный чат"
+    )
+
+    save_chat(chat_id, title)
+
+    private_chat = is_private_chat(chat)
+    admin = is_admin(user_id)
+    reply_markup = get_keyboard(chat, user_id)
+
+    if text_lower == "/chatid":
+        send_message(chat_id, f"Chat ID: {chat_id}", reply_markup)
+        return
+
+    if text_lower in ["/debugcars", "/debugавто"]:
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна только администратору.",
+                reply_markup,
+            )
+            return
+
+        try:
+            send_message(
+                chat_id,
+                build_debug_cars_message(user_id),
+                reply_markup,
+            )
+        except Exception as exc:
+            send_message(
+                chat_id,
+                f"DEBUG ERROR: {exc}",
+                reply_markup,
+            )
+        return
+
+    if text_lower in [
+        "🚗 уточнить место дислокации груза",
+        "уточнить место дислокации груза",
+        "/cars",
+        "/авто",
+    ]:
+        try:
+            access_id = user_id if private_chat else chat_id
+            show_client_cars(chat_id, access_id)
+        except Exception as exc:
+            print(f"Ошибка получения автомобилей: {exc}", flush=True)
+            send_message(
+                chat_id,
+                "Не удалось получить данные по автомобилям. "
+                "Попробуйте повторить запрос немного позже.",
+                reply_markup,
+            )
+        return
+
+    if text_lower == "/addgroup":
+        if private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна администратору в группе.",
+                reply_markup,
+            )
+            return
+
+        add_broadcast_group(chat_id, title, mode="send")
+        send_message(
+            chat_id,
+            "✅ Группа добавлена в рассылку.",
+            reply_markup,
+        )
+        return
+
+    if text_lower == "/addpin":
+        if private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна администратору в группе.",
+                reply_markup,
+            )
+            return
+
+        add_broadcast_group(chat_id, title, mode="pin", message_id=None)
+        sent = send_message(chat_id, build_message())
+        message_id = sent["result"]["message_id"]
+        pin_message(chat_id, message_id)
+        update_group_message_id(chat_id, message_id)
+        return
+
+    if text_lower == "/removegroup":
+        if private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна администратору в группе.",
+                reply_markup,
+            )
+            return
+
+        removed = remove_broadcast_group(chat_id)
+        send_message(
+            chat_id,
+            "❌ Группа удалена из рассылки."
+            if removed
+            else "Этой группы не было в списке.",
+            reply_markup,
+        )
+        return
+
+    if text_lower == "/groups":
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна только администратору.",
+                reply_markup,
+            )
+            return
+
+        send_message(chat_id, get_groups_message(), reply_markup)
+        return
+
+    if text_lower == "/cancelbroadcast":
+        waiting_for_custom_broadcast.discard(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+        send_message(
+            chat_id,
+            "Создание рассылки отменено ❌",
+            reply_markup,
+        )
+        return
+
+    if chat_id in waiting_for_custom_broadcast:
+        if not private_chat or not admin:
+            waiting_for_custom_broadcast.discard(chat_id)
+            pending_custom_broadcast.pop(chat_id, None)
+            return
+
+        if not text:
+            send_message(
+                chat_id,
+                "Пришлите текстовое сообщение для рассылки.",
+                reply_markup,
+            )
+            return
+
+        groups = get_broadcast_groups()
+        unique_chat_ids = {str(group[0]) for group in groups}
+
+        if TEST_BROADCAST_CHAT_ID:
+            preview_count = sum(
+                1
+                for group in groups
+                if str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+            )
+            preview_mode = "\n🧪 Тестовый режим: отправка только в тестовый чат."
+        else:
+            preview_count = len(unique_chat_ids)
+            preview_mode = ""
+
+        pending_custom_broadcast[chat_id] = text
+        waiting_for_custom_broadcast.discard(chat_id)
+
+        preview_keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Отправить",
+                        "callback_data": "custom_broadcast_confirm",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": "custom_broadcast_cancel",
+                    },
+                ]
+            ]
+        }
+
+        send_message(
+            chat_id,
+            "📣 Предпросмотр рассылки:\n\n"
+            f"{text}\n\n"
+            "──────────────\n"
+            f"Получателей: {preview_count}"
+            f"{preview_mode}\n\n"
+            "Отправить это сообщение?",
+            reply_markup=preview_keyboard,
+        )
+        return
+
+    if chat_id in waiting_for_rate:
+        if not private_chat or not admin:
+            waiting_for_rate.discard(chat_id)
+            return
+
+        rates = parse_rates_from_text(text)
+
+        if not rates:
+            send_message(
+                chat_id,
+                "Не удалось распознать курсы.\n\nПример:\n76,80\n48,30",
+                reply_markup,
+            )
+            return
+
+        save_rate(rates["usd_rub"], rates["jpy_rub"])
+        waiting_for_rate.discard(chat_id)
+        send_message(
+            chat_id,
+            "Курсы сохранены ✅\n\n" + build_message(),
+            reply_markup,
+        )
+        return
+
+    if text_lower in ["/start", "старт"]:
+        if private_chat:
+            send_message(
+                chat_id,
+                "Бот запущен ✅\n\nВыберите действие в меню:",
+                reply_markup,
+            )
+        else:
+            send_message(
+                chat_id,
+                "Бот запущен ✅\n\nВ группе доступна команда /курс",
+                reply_markup,
+            )
+        return
+
+    if text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
+        send_message(chat_id, build_message(), reply_markup)
+        return
+
+    if text_lower in ["➕ внести курс", "внести курс"]:
+        if not private_chat or not admin:
+            send_message(
+                chat_id,
+                "Команда доступна только администратору.",
+                reply_markup,
+            )
+            return
+
+        waiting_for_rate.add(chat_id)
+        send_message(
+            chat_id,
+            "Введите два курса:\n\n76,80\n48,30\n\n"
+            "1-я строка — USD/RUB\n2-я строка — JPY/RUB",
+            reply_markup,
+        )
+        return
+
+    if text_lower.startswith("/addrate"):
+        if not private_chat or not admin:
+            send_message(chat_id, "Нет доступа.", reply_markup)
+            return
+
+        rates = parse_rates_from_text(text)
+
+        if not rates:
+            send_message(
+                chat_id,
+                "Используйте: /addrate 76,80 48,30",
+                reply_markup,
+            )
+            return
+
+        save_rate(rates["usd_rub"], rates["jpy_rub"])
+        send_message(
+            chat_id,
+            "Курсы сохранены ✅\n\n" + build_message(),
+            reply_markup,
+        )
+        return
+
+    if text_lower in ["/status", "✅ статус", "статус"]:
+        if admin:
+            try:
+                get_japan_spreadsheet()
+                sheets_status = "Google Таблица подключена ✅"
+            except Exception as exc:
+                sheets_status = f"Ошибка Google Таблицы: {exc}"
+
+            send_message(
+                chat_id,
+                f"Бот работает ✅\n{sheets_status}",
+                reply_markup,
+            )
+        else:
+            send_message(chat_id, "Бот работает ✅", reply_markup)
+        return
+
+    if text_lower in ["/chats", "💬 чаты", "чаты"]:
+        if not private_chat or not admin:
+            send_message(chat_id, "Нет доступа.", reply_markup)
+            return
+
+        send_message(chat_id, get_chats_message(), reply_markup)
+        return
+
+    if text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
+        if not private_chat or not admin:
+            send_message(chat_id, "Нет доступа.", reply_markup)
+            return
+
+        groups = get_broadcast_groups()
+
+        if not groups:
+            send_message(
+                chat_id,
+                "Нет групп, подключенных к рассылке.",
+                reply_markup,
+            )
+            return
+
+        if TEST_BROADCAST_CHAT_ID:
+            test_group_found = any(
+                str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+                for group in groups
+            )
+
+            if not test_group_found:
+                send_message(
+                    chat_id,
+                    "🧪 Включён тестовый режим, но тестовый чат "
+                    "не найден среди групп рассылки.\n\n"
+                    "Проверь TEST_BROADCAST_CHAT_ID.",
+                    reply_markup,
+                )
+                return
+
+        waiting_for_custom_broadcast.add(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+
+        send_message(
+            chat_id,
+            "📣 Создание новой рассылки\n\n"
+            "Отправьте следующим сообщением текст, "
+            "который нужно разослать всем подключенным группам.\n\n"
+            "Для отмены отправьте /cancelbroadcast",
+            reply_markup,
+        )
+        return
+
+def handle_update(data):
+    callback_query = data.get("callback_query")
+
+    if callback_query:
+        callback_data = callback_query.get("data", "")
+        callback_id = callback_query.get("id")
+        user_id = callback_query.get("from", {}).get("id")
+
+        message = callback_query.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+
+        # ====================================================
+        # ПОДТВЕРЖДЕНИЕ МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_confirm":
+            answer_callback_query(callback_id)
+
+            if not is_admin(user_id):
+                send_message(chat_id, "Нет доступа.")
+                return
+
+            broadcast_text = pending_custom_broadcast.get(chat_id)
+
+            if not broadcast_text:
+                send_message(
+                    chat_id,
+                    "Черновик рассылки не найден. Создайте рассылку заново.",
+                )
+                return
+
+            # Сначала удаляем черновик, чтобы двойное нажатие
+            # не запустило повторную рассылку
+            pending_custom_broadcast.pop(chat_id, None)
+
+            send_message(
+                chat_id,
+                "📤 Начинаю рассылку...",
+            )
+
+            success, errors = send_custom_broadcast(broadcast_text)
+
+            result_text = (
+                f"Рассылка завершена ✅\n\n"
+                f"Успешно отправлено: {success}"
+            )
+
+            if errors:
+                result_text += f"\nОшибок: {errors}"
+
+            send_message(chat_id, result_text)
+            return
+
+        # ====================================================
+        # ОТМЕНА МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_cancel":
+            answer_callback_query(callback_id)
+
+            pending_custom_broadcast.pop(chat_id, None)
+            waiting_for_custom_broadcast.discard(chat_id)
+
+            send_message(
+                chat_id,
+                "Рассылка отменена ❌",
+            )
+            return
+
+        # ====================================================
+        # ОСТАЛЬНЫЕ INLINE-КНОПКИ — АВТОМОБИЛИ
+        # ====================================================
+
+        try:
+            handle_car_callback(callback_query)
+        except Exception as exc:
+            print(
+                f"Ошибка callback_query: {exc}",
+                flush=True,
+            )
+
+        return
+
+    handle_message(data)
+
+
+# ============================================================
+# FLASK / RENDER
+# ============================================================
+
+@web_app.route("/", methods=["GET"])
+def home():
+    return "AVP Bot with Japan Logistics is running ✅"
+
+
+@web_app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+        handle_update(data)
+    except Exception as exc:
+        print(f"Ошибка обработки webhook: {exc}", flush=True)
+
+    return "ok"
+
+
 def auto_broadcast_loop():
     last_sent_date = None
 
