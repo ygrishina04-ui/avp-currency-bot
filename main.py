@@ -1507,16 +1507,34 @@ def auto_broadcast_loop():
     last_sent_date = None
 
     while True:
-        now = datetime.now(ZoneInfo(TIMEZONE))
+        try:
+            now = datetime.now(ZoneInfo(TIMEZONE))
 
-        if now.hour == 11 and now.minute == 0:
-            today = now.strftime("%Y-%m-%d")
+            if now.hour >= 11:
+                today = now.strftime("%Y-%m-%d")
 
-            if last_sent_date != today and has_today_rate():
-                broadcast()
-                last_sent_date = today
+                if last_sent_date != today:
+                    if has_today_rate():
+                        print(
+                            f"Запускаю автоматическую рассылку курса за {today}",
+                            flush=True,
+                        )
 
-        time.sleep(30)
+                        broadcast()
+                        last_sent_date = today
+
+                        print(
+                            f"Автоматическая рассылка за {today} завершена",
+                            flush=True,
+                        )
+
+        except Exception as exc:
+            print(
+                f"Ошибка автоматической рассылки курса: {exc}",
+                flush=True,
+            )
+
+        time.sleep(60)
 
 
 def parse_rates_from_text(text):
