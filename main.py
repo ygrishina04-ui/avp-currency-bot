@@ -316,7 +316,7 @@ def _get_or_create_worksheet(title, headers, rows=1000, cols=10):
 
 def get_broadcast_groups_worksheet():
     """
-    Реестр рассылки хранится в JAPAN_SPREADSHEET_ID на листе BOT_РАССЫЛКА.
+    Реестр рассылки хранится в GOOGLE_SPREADSHEET_ID на листе BOT_РАССЫЛКА.
 
     Колонки:
     Клиент | Chat ID | Активен | Режим | Message ID | Обновлено
@@ -328,7 +328,9 @@ def get_broadcast_groups_worksheet():
 
     with _storage_lock:
         if _broadcast_groups_worksheet is None:
-            spreadsheet = get_japan_spreadsheet()
+            spreadsheet = get_google_client().open_by_key(
+                GOOGLE_SPREADSHEET_ID
+            )
 
             try:
                 worksheet = spreadsheet.worksheet(
@@ -1742,7 +1744,7 @@ def send_custom_broadcast(text):
 
     if not groups:
         print(
-            "Ручная рассылка отменена: BOT_ГРУППЫ пуст",
+            "Ручная рассылка отменена: BOT_РАССЫЛКА пуст",
             flush=True,
         )
         return 0, 0
@@ -1797,7 +1799,7 @@ def broadcast():
 
     if not groups:
         print(
-            "Автоматическая рассылка курса отменена: BOT_ГРУППЫ пуст",
+            "Автоматическая рассылка курса отменена: BOT_РАССЫЛКА пуст",
             flush=True,
         )
         return 0, 0
@@ -1847,6 +1849,43 @@ def broadcast():
 
 
 
+def auto_broadcast_loop():
+    last_sent_date = None
+
+    while True:
+        try:
+            now = datetime.now(ZoneInfo(TIMEZONE))
+
+            if now.hour >= 11:
+                today = now.strftime("%Y-%m-%d")
+
+                if last_sent_date != today:
+                    if has_today_rate():
+                        print(
+                            f"Запускаю автоматическую рассылку курса за {today}",
+                            flush=True,
+                        )
+
+                        success, errors = broadcast()
+
+                        if success > 0:
+                            last_sent_date = today
+
+                        print(
+                            f"Автоматическая рассылка за {today} завершена: "
+                            f"успешно {success}, ошибок {errors}",
+                            flush=True,
+                        )
+
+        except Exception as exc:
+            print(
+                f"Ошибка автоматической рассылки курса: {exc}",
+                flush=True,
+            )
+
+        time.sleep(60)
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан")
@@ -1862,6 +1901,11 @@ def main():
 
         print(
             "Постоянное Google-хранилище бота подключено ✅",
+            flush=True,
+        )
+        print(
+            f"Реестр рассылки: {BROADCAST_GROUPS_SHEET_NAME} "
+            "в GOOGLE_SPREADSHEET_ID",
             flush=True,
         )
 
