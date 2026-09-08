@@ -26,17 +26,16 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 JAPAN_SPREADSHEET_ID = os.getenv("JAPAN_SPREADSHEET_ID")
 RATES_SHEET_NAME = os.getenv("RATES_SHEET_NAME", "BOT_КУРСЫ")
+BROADCAST_GROUPS_SHEET_NAME = os.getenv("BROADCAST_GROUPS_SHEET_NAME", "BOT_РАССЫЛКА")
+LOGISTICS_SNAPSHOT_SHEET_NAME = os.getenv("LOGISTICS_SNAPSHOT_SHEET_NAME", "BOT_СНИМКИ")
+BOT_STATE_SHEET_NAME = os.getenv("BOT_STATE_SHEET_NAME", "BOT_СОСТОЯНИЕ")
+TEST_BROADCAST_CHAT_ID = os.getenv("TEST_BROADCAST_CHAT_ID")
 
 CLIENTS_SHEET_NAME = os.getenv("JAPAN_CLIENTS_SHEET", "Клиенты")
 LOGISTICS_SHEET_NAME = os.getenv("JAPAN_LOGISTICS_SHEET", "Сверка 2.0")
 
 WATCH_INTERVAL_SECONDS = int(os.getenv("JAPAN_WATCH_INTERVAL_SECONDS", "300"))
 DISCOUNT_FACTOR = 0.9985  # минус 0,15%
-
-MAINTENANCE_MESSAGE = (
-    "🛠 Ведутся технические работы.\n\n"
-    "Мы сообщим о восстановлении работы нашего помощника."
-)
 
 ADMIN_USER_IDS = {
     int(x.strip())
@@ -54,11 +53,12 @@ BODY_NUMBER_COLUMN = "Номер кузова"
 
 YARD_PLAN_COLUMN = "ПЛАН дата доставки на ярд"
 YARD_FACT_COLUMN = "ФАКТ дата доставки на ярд"
-JAPAN_EXIT_PLAN_COLUMN = "ПЛАН выхода из Японии"
+CONTAINER_LOADING_FACT_COLUMN = "ФАКТ дата погрузки"
+JAPAN_EXIT_PLAN_COLUMN = "ПЛАН выхода из Япония"
 JAPAN_EXIT_FACT_COLUMN = "ФАКТ выхода из Японии"
-CHINA_KOREA_ARRIVAL_COLUMN = "Дата прибытия в Китай/Корею"
-CHINA_EXIT_PLAN_COLUMN = "ПЛАН выхода из Китай"
-CHINA_EXIT_FACT_COLUMN = "ФАКТ выхода из Китай"
+CHINA_KOREA_ARRIVAL_COLUMN = "Дата прибытия в порт перегруза"
+CHINA_EXIT_PLAN_COLUMN = "ПЛАН выхода из порта перегруза"
+CHINA_EXIT_FACT_COLUMN = "ФАКТ выхода из порта перегруза"
 RUSSIA_ARRIVAL_PLAN_COLUMN = "ПЛАН прибытия в РФ"
 RUSSIA_ARRIVAL_FACT_COLUMN = "ФАКТ прибытия в РФ"
 RELEASE_DATE_COLUMN = "ВЫПУСК ДАТА"
@@ -70,12 +70,13 @@ TRACKED_COLUMNS = {
     YARD_FACT_COLUMN: ("Автомобиль доставлен на ярд", "fact"),
     JAPAN_EXIT_PLAN_COLUMN: ("Плановая дата выхода из Японии", "plan"),
     JAPAN_EXIT_FACT_COLUMN: ("Автомобиль вышел из Японии", "fact"),
-    CHINA_KOREA_ARRIVAL_COLUMN: ("Дата прибытия в Китай/Корею", "fact"),
-    CHINA_EXIT_PLAN_COLUMN: ("Плановая дата выхода из Китая", "plan"),
-    CHINA_EXIT_FACT_COLUMN: ("Автомобиль вышел из Китая", "fact"),
+    CHINA_KOREA_ARRIVAL_COLUMN: ("Дата прибытия в порт перегруза", "fact"),
+    CHINA_EXIT_PLAN_COLUMN: ("Плановая дата выхода из порта перегруза", "plan"),
+    CHINA_EXIT_FACT_COLUMN: ("Автомобиль вышел из порта перегруза", "fact"),
     RUSSIA_ARRIVAL_PLAN_COLUMN: ("Плановая дата прибытия в Россию", "plan"),
     RUSSIA_ARRIVAL_FACT_COLUMN: ("Автомобиль прибыл в Россию", "fact"),
     RELEASE_DATE_COLUMN: ("Автомобиль выпущен", "fact"),
+    CONTAINER_LOADING_FACT_COLUMN: ("Автомобиль погружен","fact"),
 }
 
 # Этапы для ответа по кнопке «Уточнить место дислокации груза».
@@ -93,10 +94,10 @@ STAGES = [
         "date_label": "Плановая дата выхода из Японии",
     },
     {
-        "name": "Ожидается выход из Китая",
+        "name": "Ожидается выход из порта перегруза",
         "plan": CHINA_EXIT_PLAN_COLUMN,
         "fact": CHINA_EXIT_FACT_COLUMN,
-        "date_label": "Плановая дата выхода из Китая",
+        "date_label": "Плановая дата выхода из порта перегруза",
     },
     {
         "name": "Автомобиль следует в Россию",
@@ -107,12 +108,18 @@ STAGES = [
 ]
 
 waiting_for_rate = set()
+waiting_for_custom_broadcast = set()
+pending_custom_broadcast = {}
 web_app = Flask(__name__)
 
 _google_client = None
 _google_worksheet = None
+_broadcast_groups_worksheet = None
+_snapshot_worksheet = None
+_state_worksheet = None
 _google_lock = threading.Lock()
 _rates_lock = threading.Lock()
+_storage_lock = threading.Lock()
 
 
 # ============================================================
@@ -142,7 +149,7 @@ def get_keyboard(chat, user_id):
             "keyboard": [
                 ["📊 Курс", "➕ Внести курс"],
                 ["🚗 Уточнить место дислокации груза"],
-                ["📣 Массовая рассылка", "💬 Чаты"],
+                ["📣 Рассылка", "💬 Чаты"],
                 ["✅ Статус"],
             ],
             "resize_keyboard": True,
@@ -278,38 +285,253 @@ def save_chat(chat_id, title):
     conn.close()
 
 
-def get_snapshot_value(car_key, column_name):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT value
-        FROM logistics_snapshot
-        WHERE car_key = ? AND column_name = ?
-        """,
-        (car_key, column_name),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return None if row is None else row[0]
+def get_storage_spreadsheet():
+    """Постоянное техническое хранилище бота в Google Sheets."""
+    if not GOOGLE_SPREADSHEET_ID:
+        raise RuntimeError("GOOGLE_SPREADSHEET_ID не задан")
+
+    return get_google_client().open_by_key(GOOGLE_SPREADSHEET_ID)
 
 
-def save_snapshot_value(car_key, column_name, value):
+def _get_or_create_worksheet(title, headers, rows=1000, cols=10):
+    spreadsheet = get_storage_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=title,
+            rows=rows,
+            cols=cols,
+        )
+
+    current_headers = worksheet.row_values(1)
+
+    if not current_headers:
+        worksheet.update(
+            values=[headers],
+            range_name=f"A1:{chr(64 + len(headers))}1",
+        )
+
+    return worksheet
+
+
+def get_broadcast_groups_worksheet():
+    """
+    Реестр рассылки хранится в GOOGLE_SPREADSHEET_ID на листе BOT_РАССЫЛКА.
+
+    Колонки:
+    Клиент | Chat ID | Активен | Режим | Message ID | Обновлено
+    """
+    global _broadcast_groups_worksheet
+
+    if _broadcast_groups_worksheet is not None:
+        return _broadcast_groups_worksheet
+
+    with _storage_lock:
+        if _broadcast_groups_worksheet is None:
+            spreadsheet = get_google_client().open_by_key(
+                GOOGLE_SPREADSHEET_ID
+            )
+
+            try:
+                worksheet = spreadsheet.worksheet(
+                    BROADCAST_GROUPS_SHEET_NAME
+                )
+            except gspread.WorksheetNotFound:
+                worksheet = spreadsheet.add_worksheet(
+                    title=BROADCAST_GROUPS_SHEET_NAME,
+                    rows=1000,
+                    cols=6,
+                )
+
+            headers = [
+                "Клиент",
+                "Chat ID",
+                "Активен",
+                "Режим",
+                "Message ID",
+                "Обновлено",
+            ]
+
+            current_headers = worksheet.row_values(1)
+
+            if not current_headers:
+                worksheet.update(
+                    values=[headers],
+                    range_name="A1:F1",
+                )
+            elif current_headers[:6] != headers:
+                # Не перезаписываем существующие данные автоматически.
+                # Если лист уже есть в другом формате — создаём правильные заголовки
+                # только если ниже нет данных.
+                if len(worksheet.get_all_values()) <= 1:
+                    worksheet.update(
+                        values=[headers],
+                        range_name="A1:F1",
+                    )
+
+            _broadcast_groups_worksheet = worksheet
+
+    return _broadcast_groups_worksheet
+
+
+def get_snapshot_worksheet():
+    global _snapshot_worksheet
+
+    if _snapshot_worksheet is not None:
+        return _snapshot_worksheet
+
+    with _storage_lock:
+        if _snapshot_worksheet is None:
+            _snapshot_worksheet = _get_or_create_worksheet(
+                LOGISTICS_SNAPSHOT_SHEET_NAME,
+                [
+                    "Car Key",
+                    "Колонка",
+                    "Значение",
+                    "Обновлено",
+                ],
+                rows=5000,
+                cols=4,
+            )
+
+    return _snapshot_worksheet
+
+
+
+def get_state_worksheet():
+    """Постоянное состояние бота, переживающее deploy/restart Render."""
+    global _state_worksheet
+
+    if _state_worksheet is not None:
+        return _state_worksheet
+
+    with _storage_lock:
+        if _state_worksheet is None:
+            _state_worksheet = _get_or_create_worksheet(
+                BOT_STATE_SHEET_NAME,
+                [
+                    "Ключ",
+                    "Значение",
+                    "Обновлено",
+                ],
+                rows=5000,
+                cols=3,
+            )
+
+    return _state_worksheet
+
+
+def get_bot_state(key):
+    """Возвращает значение состояния по ключу или None."""
+    worksheet = get_state_worksheet()
+    values = worksheet.get_all_values()
+
+    for row in values[1:]:
+        if not row:
+            continue
+
+        row_key = str(row[0]).strip()
+        if row_key == str(key):
+            return str(row[1]).strip() if len(row) > 1 else ""
+
+    return None
+
+
+def set_bot_state(key, value):
+    """Создает или обновляет значение состояния в Google Sheets."""
+    worksheet = get_state_worksheet()
+    values = worksheet.get_all_values()
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
 
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO logistics_snapshot (car_key, column_name, value, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(car_key, column_name)
-        DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        """,
-        (car_key, column_name, value, now),
+    for row_number, row in enumerate(values[1:], start=2):
+        if not row:
+            continue
+
+        if str(row[0]).strip() == str(key):
+            worksheet.update(
+                values=[[str(key), str(value), now]],
+                range_name=f"A{row_number}:C{row_number}",
+            )
+            return
+
+    worksheet.append_row(
+        [str(key), str(value), now],
+        value_input_option="USER_ENTERED",
     )
-    conn.commit()
-    conn.close()
+
+
+def rate_broadcast_state_key(date_iso, chat_id):
+    return f"rate_broadcast:{date_iso}:{chat_id}"
+
+
+def load_snapshot_state():
+    """Читает постоянный снимок дат из Google Sheets."""
+    worksheet = get_snapshot_worksheet()
+    values = worksheet.get_all_values()
+
+    snapshot = {}
+    row_numbers = {}
+
+    for row_number, row in enumerate(values[1:], start=2):
+        if len(row) < 2:
+            continue
+
+        car_key = str(row[0]).strip()
+        column_name = str(row[1]).strip()
+
+        if not car_key or not column_name:
+            continue
+
+        value = str(row[2]).strip() if len(row) > 2 else ""
+        key = (car_key, column_name)
+
+        snapshot[key] = value
+        row_numbers[key] = row_number
+
+    return snapshot, row_numbers
+
+
+def initialize_snapshot_in_google(logistics_rows):
+    """Первичная инициализация без рассылки старых изменений."""
+    worksheet = get_snapshot_worksheet()
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    rows = [[
+        "Car Key",
+        "Колонка",
+        "Значение",
+        "Обновлено",
+    ]]
+
+    for row in logistics_rows:
+        car_key = make_car_key(row)
+
+        if car_key == "|":
+            continue
+
+        for column_name in TRACKED_COLUMNS:
+            rows.append([
+                car_key,
+                column_name,
+                str(row.get(column_name, "")).strip(),
+                now,
+            ])
+
+    worksheet.clear()
+
+    if rows:
+        worksheet.update(
+            values=rows,
+            range_name=f"A1:D{len(rows)}",
+        )
+
+    print(
+        f"BOT_СНИМКИ инициализирован: {max(len(rows) - 1, 0)} значений. "
+        "Старые изменения не рассылаются.",
+        flush=True,
+    )
 
 
 # ============================================================
@@ -579,79 +801,105 @@ def format_date(value):
 
 
 def get_current_stage(row):
-    """Определяет этап по самой поздней заполненной фактической дате."""
+    """Определяет фактический статус автомобиля.
+
+    Плановые даты не меняют текущий статус.
+    """
+
     if is_nonempty(row.get(RELEASE_DATE_COLUMN)):
         return {
+            "code": "released",
             "name": "Автомобиль выпущен",
-            "date_label": "Дата выпуска",
-            "date": format_date(row.get(RELEASE_DATE_COLUMN)),
             "completed": True,
         }
 
     if is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
         return {
+            "code": "russia_arrived",
             "name": "Автомобиль прибыл в Россию и ожидает выпуска",
-            "date_label": "Фактическая дата прибытия в РФ",
-            "date": format_date(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)),
             "completed": False,
         }
 
     if is_nonempty(row.get(CHINA_EXIT_FACT_COLUMN)):
         return {
+            "code": "left_china",
             "name": "Автомобиль следует в Россию",
-            "date_label": "Плановая дата прибытия в РФ",
-            "date": format_date(row.get(RUSSIA_ARRIVAL_PLAN_COLUMN)),
             "completed": False,
         }
 
     if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
         return {
-            "name": "Автомобиль находится в Китае/Корее и ожидает выхода",
-            "date_label": "Плановая дата выхода из Китая",
-            "date": format_date(row.get(CHINA_EXIT_PLAN_COLUMN)),
+            "code": "china_arrived",
+            "name": "Автомобиль прибыл в порт перегруза и ожидает дальнейшую отправку",
             "completed": False,
         }
 
     if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
         return {
-            "name": "Автомобиль следует в Китай/Корею",
-            "date_label": "Дата прибытия в Китай/Корею",
-            "date": format_date(row.get(CHINA_KOREA_ARRIVAL_COLUMN)),
+            "code": "left_japan",
+            "name": "Автомобиль следует в порт перегруза",
+            "completed": False,
+        }
+
+    if is_nonempty(row.get(CONTAINER_LOADING_FACT_COLUMN)):
+        return {
+            "code": "loaded",
+            "name": "Автомобиль погружен и ожидает отправку из Японии",
             "completed": False,
         }
 
     if is_nonempty(row.get(YARD_FACT_COLUMN)):
         return {
-            "name": "Ожидается выход из Японии",
-            "date_label": "Плановая дата выхода из Японии",
-            "date": format_date(row.get(JAPAN_EXIT_PLAN_COLUMN)),
+            "code": "on_yard",
+            "name": "Автомобиль находится на ярде и ожидает погрузку",
             "completed": False,
         }
 
     return {
-        "name": "Ожидается доставка автомобиля на ярд",
-        "date_label": "Плановая дата доставки на ярд",
-        "date": format_date(row.get(YARD_PLAN_COLUMN)),
+        "code": "before_yard",
+        "name": "Автомобиль ожидает доставку на ярд",
         "completed": False,
     }
 
+def get_stage_plan_lines(row, stage_code):
+    """Возвращает только актуальные плановые даты следующих этапов."""
 
-def build_car_history(row):
-    """Формирует хронологию по заполненным фактическим датам."""
-    events = [
-        ("Доставлен на ярд", YARD_FACT_COLUMN),
-        ("Вышел из Японии", JAPAN_EXIT_FACT_COLUMN),
-        ("Прибыл в Китай/Корею", CHINA_KOREA_ARRIVAL_COLUMN),
-        ("Вышел из Китая", CHINA_EXIT_FACT_COLUMN),
-        ("Прибыл в Россию", RUSSIA_ARRIVAL_FACT_COLUMN),
-        ("Выпущен", RELEASE_DATE_COLUMN),
-    ]
+    plans_by_stage = {
+        "before_yard": [
+            ("📅 План доставки на ярд", YARD_PLAN_COLUMN),
+            ("📅 План выхода из Японии", JAPAN_EXIT_PLAN_COLUMN),
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "on_yard": [
+            ("📅 План выхода из Японии", JAPAN_EXIT_PLAN_COLUMN),
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "loaded": [
+            ("📅 План выхода из Японии", JAPAN_EXIT_PLAN_COLUMN),
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "left_japan": [
+            ("📅 План выхода из порта перегруза", CHINA_EXIT_PLAN_COLUMN),
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "china_arrived": [
+            ("📅 План выхода из порта перегруза", CHINA_EXIT_PLAN_COLUMN),
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "left_china": [
+            ("📅 План прибытия в РФ", RUSSIA_ARRIVAL_PLAN_COLUMN),
+        ],
+        "russia_arrived": [],
+        "released": [],
+    }
 
     lines = []
-    for label, column in events:
+
+    for label, column in plans_by_stage.get(stage_code, []):
         value = row.get(column)
+
         if is_nonempty(value):
-            lines.append(f"• {format_date(value)} — {label}")
+            lines.append(f"{label}: {format_date(value)}")
 
     return lines
 
@@ -664,19 +912,16 @@ def format_car_status(row):
     text = (
         f"🚗 {model}\n"
         f"🔢 Номер кузова: {body_number}\n\n"
-        f"📍 Текущий этап: {stage['name']}\n"
-        f"📅 {stage['date_label']}: {stage['date']}"
+        f"📍 Текущий статус: {stage['name']}"
     )
 
-    if (
-        is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN))
-        or is_nonempty(row.get(RELEASE_DATE_COLUMN))
-    ):
-        history = build_car_history(row)
-        if history:
-            text += "\n\n🗓 Хронология перевозки:\n" + "\n".join(history)
+    plan_lines = get_stage_plan_lines(row, stage["code"])
+
+    if plan_lines:
+        text += "\n\n" + "\n".join(plan_lines)
 
     return text
+
 
 def normalize_body_number(value):
     return re.sub(r"\s+", "", str(value or "")).upper()
@@ -693,11 +938,11 @@ def build_cars_keyboard(cars):
         model = str(car.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
         body = str(car.get(BODY_NUMBER_COLUMN, "")).strip()
         completed = is_nonempty(car.get(RELEASE_DATE_COLUMN))
-        prefix = "✅ " if completed else "🚗 "
-        text = f"{prefix}{model} / {body}"
+        suffix = " ✅" if completed else ""
+        text = f"{model} / {body}{suffix}"
 
         if len(text) > 60:
-            text = f"{prefix}{model[:24]}… / {body[-22:]}"
+            text = f"{model[:28]}… / {body[-22:]}{suffix}"
 
         buttons.append(
             [
@@ -859,63 +1104,101 @@ def make_car_key(row):
 
 
 def build_date_notification(row, column_name, old_value, new_value):
+    """Формирует понятное клиентское уведомление об изменении даты."""
+
     model = str(row.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
     body = str(row.get(BODY_NUMBER_COLUMN, "")).strip() or "не указан"
     event_title, value_type = TRACKED_COLUMNS[column_name]
 
-    if not old_value:
-        if value_type == "plan":
-            heading = f"📅 Добавлена дата: {event_title}"
-        else:
-            heading = f"✅ Обновление: {event_title}"
+    plan_labels = {
+        YARD_PLAN_COLUMN: "Планируемая дата доставки на ярд",
+        JAPAN_EXIT_PLAN_COLUMN: "Планируемая дата выхода из Японии",
+        CHINA_EXIT_PLAN_COLUMN: "Планируемая дата выхода из порта перегруза",
+        RUSSIA_ARRIVAL_PLAN_COLUMN: "Планируемая дата прибытия в РФ",
+    }
 
-        return (
-            f"🚗 {model}\n"
-            f"🔢 Номер кузова: {body}\n\n"
-            f"{heading}\n"
-            f"Дата: {format_date(new_value)}"
-        )
+    fact_statuses = {
+        YARD_FACT_COLUMN:
+            "Автомобиль находится на ярде и ожидает погрузку",
+        CONTAINER_LOADING_FACT_COLUMN:
+            "Автомобиль погружен и ожидает отправку из Японии",
+        JAPAN_EXIT_FACT_COLUMN:
+            "Автомобиль следует в порт перегруза",
+        CHINA_KOREA_ARRIVAL_COLUMN:
+            "Автомобиль прибыл в порт перегруза и ожидает дальнейшую отправку",
+        CHINA_EXIT_FACT_COLUMN:
+            "Автомобиль следует в Россию",
+        RUSSIA_ARRIVAL_FACT_COLUMN:
+            "Автомобиль прибыл в Россию и ожидает выпуска",
+        RELEASE_DATE_COLUMN:
+            "Автомобиль выпущен",
+    }
 
-    if value_type == "plan":
-        heading = f"⚠️ Изменена дата: {event_title}"
-    else:
-        heading = f"⚠️ Уточнена дата: {event_title}"
-
-    return (
+    header = (
         f"🚗 {model}\n"
         f"🔢 Номер кузова: {body}\n\n"
-        f"{heading}\n"
-        f"Было: {format_date(old_value)}\n"
-        f"Стало: {format_date(new_value)}"
     )
 
+    # Новая плановая дата.
+    if value_type == "plan" and not old_value:
+        label = plan_labels.get(column_name, event_title)
 
-def initialize_logistics_snapshot(logistics_rows):
-    saved = 0
+        return (
+            header
+            + "📅 Обновился план перевозки\n\n"
+            + f"{label}: {format_date(new_value)}"
+        )
 
-    for row in logistics_rows:
-        car_key = make_car_key(row)
+    # Изменение уже существующей плановой даты.
+    if value_type == "plan":
+        label = plan_labels.get(column_name, event_title)
 
-        if car_key == "|":
-            continue
+        return (
+            header
+            + f"⚠️ Изменилась {label.lower()}\n\n"
+            + f"Было: {format_date(old_value)}\n"
+            + f"Стало: {format_date(new_value)}"
+        )
 
-        for column_name in TRACKED_COLUMNS:
-            new_value = str(row.get(column_name, "")).strip()
-            previous = get_snapshot_value(car_key, column_name)
+    status_text = fact_statuses.get(column_name, event_title)
 
-            if previous is None:
-                save_snapshot_value(car_key, column_name, new_value)
-                saved += 1
+    # Впервые появился факт прохождения этапа.
+    if not old_value:
+        return (
+            header
+            + f"✅ {event_title}\n\n"
+            + f"📅 Дата: {format_date(new_value)}\n"
+            + f"📍 Текущий статус: {status_text}"
+        )
 
-    return saved
+    # Фактическая дата уже была и её скорректировали.
+    return (
+        header
+        + "⚠️ Уточнена дата события\n\n"
+        + f"{event_title}\n"
+        + f"Было: {format_date(old_value)}\n"
+        + f"Стало: {format_date(new_value)}\n\n"
+        + f"📍 Текущий статус: {status_text}"
+    )
 
 
 def check_logistics_updates():
     clients_rows = get_clients_rows()
     logistics_rows = get_logistics_rows()
 
-    # Первый запуск по каждому автомобилю/полю только сохраняет значения.
-    initialize_logistics_snapshot(logistics_rows)
+    snapshot, row_numbers = load_snapshot_state()
+
+    # Первый запуск после перехода на Google-хранилище:
+    # фиксируем текущее состояние и ничего старого не рассылаем.
+    if not snapshot:
+        initialize_snapshot_in_google(logistics_rows)
+        return
+
+    worksheet = get_snapshot_worksheet()
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    rows_to_append = []
+    batch_updates = []
 
     for row in logistics_rows:
         client_name = str(row.get(CLIENT_COLUMN, "")).strip()
@@ -928,18 +1211,40 @@ def check_logistics_updates():
         telegram_ids = None
 
         for column_name in TRACKED_COLUMNS:
+            key = (car_key, column_name)
             new_value = str(row.get(column_name, "")).strip()
-            old_value = get_snapshot_value(car_key, column_name)
 
-            if old_value is None:
-                save_snapshot_value(car_key, column_name, new_value)
+            # Новая машина или новая колонка — принимаем как исходное состояние.
+            if key not in snapshot:
+                rows_to_append.append([
+                    car_key,
+                    column_name,
+                    new_value,
+                    now,
+                ])
+                snapshot[key] = new_value
                 continue
+
+            old_value = snapshot[key]
 
             if new_value == old_value:
                 continue
 
-            # Снимок обновляем всегда, включая очистку значения.
-            save_snapshot_value(car_key, column_name, new_value)
+            snapshot[key] = new_value
+            existing_row_number = row_numbers.get(key)
+
+            if existing_row_number:
+                batch_updates.append({
+                    "range": f"C{existing_row_number}:D{existing_row_number}",
+                    "values": [[new_value, now]],
+                })
+            else:
+                rows_to_append.append([
+                    car_key,
+                    column_name,
+                    new_value,
+                    now,
+                ])
 
             # Очистку/удаление даты клиенту не показываем.
             if not new_value:
@@ -978,6 +1283,15 @@ def check_logistics_updates():
                         flush=True,
                     )
 
+    if batch_updates:
+        worksheet.batch_update(batch_updates)
+
+    if rows_to_append:
+        worksheet.append_rows(
+            rows_to_append,
+            value_input_option="USER_ENTERED",
+        )
+
 
 def logistics_watch_loop():
     while True:
@@ -993,57 +1307,396 @@ def logistics_watch_loop():
 # СОХРАНЁННАЯ ЛОГИКА ВАЛЮТНОГО БОТА
 # ============================================================
 
-def add_broadcast_group(chat_id, title, mode="send", message_id=None):
+def is_broadcast_active(value):
+    normalized = str(value or "").strip().casefold()
+
+    return normalized in {
+        "да",
+        "активен",
+        "активно",
+        "active",
+        "yes",
+        "true",
+        "1",
+        "✅",
+        "+",
+    }
+
+
+def _find_broadcast_group_row(chat_id):
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+    target = normalize_telegram_id(chat_id)
+
+    for row_number, row in enumerate(values[1:], start=2):
+        row_chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        if row_chat_id == target:
+            return row_number, row
+
+    return None, None
+
+
+def migrate_old_broadcast_groups():
+    """
+    Один раз подтягивает старые записи из BOT_ГРУППЫ
+    в GOOGLE_SPREADSHEET_ID и отмечает их активными в BOT_РАССЫЛКА.
+
+    Старый лист не удаляется и не изменяется.
+    """
+    if not GOOGLE_SPREADSHEET_ID:
+        return 0
+
+    try:
+        old_spreadsheet = get_google_client().open_by_key(
+            GOOGLE_SPREADSHEET_ID
+        )
+
+        try:
+            old_worksheet = old_spreadsheet.worksheet("BOT_ГРУППЫ")
+        except gspread.WorksheetNotFound:
+            return 0
+
+        old_values = old_worksheet.get_all_values()
+
+        if len(old_values) <= 1:
+            return 0
+
+        registry = get_broadcast_groups_worksheet()
+        registry_values = registry.get_all_values()
+
+        existing_ids = {
+            normalize_telegram_id(row[1])
+            for row in registry_values[1:]
+            if len(row) > 1 and normalize_telegram_id(row[1])
+        }
+
+        now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+        rows_to_append = []
+
+        # Старый формат:
+        # Chat ID | Название | Режим | Message ID | Добавлено
+        for row in old_values[1:]:
+            old_chat_id = normalize_telegram_id(
+                row[0] if len(row) > 0 else ""
+            )
+
+            if not old_chat_id or old_chat_id in existing_ids:
+                continue
+
+            old_title = str(
+                row[1] if len(row) > 1 else ""
+            ).strip()
+
+            old_mode = str(
+                row[2] if len(row) > 2 else "send"
+            ).strip() or "send"
+
+            old_message_id = str(
+                row[3] if len(row) > 3 else ""
+            ).strip()
+
+            rows_to_append.append([
+                old_title,
+                old_chat_id,
+                "ДА",
+                old_mode,
+                old_message_id,
+                now,
+            ])
+
+            existing_ids.add(old_chat_id)
+
+        if rows_to_append:
+            registry.append_rows(
+                rows_to_append,
+                value_input_option="USER_ENTERED",
+            )
+
+        return len(rows_to_append)
+
+    except Exception as exc:
+        print(
+            f"Ошибка миграции старого BOT_ГРУППЫ: {exc}",
+            flush=True,
+        )
+        return 0
+
+
+def sync_broadcast_registry_from_clients():
+    """
+    Добавляет в BOT_РАССЫЛКА всех клиентов из листа «Клиенты».
+
+    Новые строки создаются как НЕАКТИВНЫЕ, чтобы случайно не отправить
+    рассылку всем клиентам. Уже выставленный статус не изменяется.
+    """
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+
+    existing_by_id = {}
+
+    for row_number, row in enumerate(values[1:], start=2):
+        chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        if chat_id:
+            existing_by_id[chat_id] = (row_number, row)
+
+    clients_rows = get_clients_rows()
     now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO broadcast_groups
-        (chat_id, title, created_at, mode, message_id)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (str(chat_id), title, now, mode, message_id),
-    )
-    conn.commit()
-    conn.close()
+
+    rows_to_append = []
+    updates = []
+
+    for client_row in clients_rows:
+        client_name = str(
+            client_row.get(CLIENT_COLUMN, "")
+        ).strip()
+
+        chat_id = normalize_telegram_id(
+            client_row.get(TELEGRAM_ID_COLUMN, "")
+        )
+
+        if not client_name or not chat_id:
+            continue
+
+        existing = existing_by_id.get(chat_id)
+
+        if existing:
+            row_number, row = existing
+
+            # Если название клиента поменялось/было пустое — обновляем только его.
+            current_name = str(
+                row[0] if len(row) > 0 else ""
+            ).strip()
+
+            if current_name != client_name:
+                updates.append({
+                    "range": f"A{row_number}",
+                    "values": [[client_name]],
+                })
+
+            continue
+
+        rows_to_append.append([
+            client_name,
+            chat_id,
+            "НЕТ",
+            "send",
+            "",
+            now,
+        ])
+
+        existing_by_id[chat_id] = (None, rows_to_append[-1])
+
+    if updates:
+        worksheet.batch_update(updates)
+
+    if rows_to_append:
+        worksheet.append_rows(
+            rows_to_append,
+            value_input_option="USER_ENTERED",
+        )
+
+    if rows_to_append:
+        print(
+            f"BOT_РАССЫЛКА: автоматически добавлено "
+            f"{len(rows_to_append)} новых чатов из листа «Клиенты»",
+            flush=True,
+        )
+
+    return len(rows_to_append)
+
+
+def add_broadcast_group(chat_id, title, mode="send", message_id=None):
+    """
+    Команда /addgroup остаётся для совместимости,
+    но теперь просто создаёт/активирует строку в BOT_РАССЫЛКА.
+    """
+    worksheet = get_broadcast_groups_worksheet()
+    now = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    row_number, row = _find_broadcast_group_row(chat_id)
+
+    values = [[
+        str(title or ""),
+        normalize_telegram_id(chat_id),
+        "ДА",
+        str(mode or "send"),
+        "" if message_id is None else str(message_id),
+        now,
+    ]]
+
+    if row_number:
+        worksheet.update(
+            values=values,
+            range_name=f"A{row_number}:F{row_number}",
+        )
+    else:
+        worksheet.append_row(
+            values[0],
+            value_input_option="USER_ENTERED",
+        )
 
 
 def update_group_message_id(chat_id, message_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE broadcast_groups SET message_id = ? WHERE chat_id = ?",
-        (message_id, str(chat_id)),
+    worksheet = get_broadcast_groups_worksheet()
+    row_number, row = _find_broadcast_group_row(chat_id)
+
+    if not row_number:
+        return
+
+    while len(row) < 6:
+        row.append("")
+
+    row[4] = str(message_id)
+    row[5] = datetime.now(ZoneInfo(TIMEZONE)).isoformat()
+
+    worksheet.update(
+        values=[row[:6]],
+        range_name=f"A{row_number}:F{row_number}",
     )
-    conn.commit()
-    conn.close()
 
 
 def remove_broadcast_group(chat_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM broadcast_groups WHERE chat_id = ?",
-        (str(chat_id),),
+    """
+    Ничего не удаляем физически.
+    /removegroup только ставит Активен = НЕТ.
+    """
+    worksheet = get_broadcast_groups_worksheet()
+    row_number, row = _find_broadcast_group_row(chat_id)
+
+    if not row_number:
+        return False
+
+    worksheet.update(
+        values=[["НЕТ"]],
+        range_name=f"C{row_number}",
     )
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return deleted > 0
+    worksheet.update(
+        values=[[datetime.now(ZoneInfo(TIMEZONE)).isoformat()]],
+        range_name=f"F{row_number}",
+    )
+
+    return True
+
+
+
+def get_currency_broadcast_chats_from_clients():
+    """
+    Возвращает уникальные Telegram-чаты прямо из листа «Клиенты».
+
+    Источник:
+    JAPAN_SPREADSHEET_ID -> лист «Клиенты» ->
+    колонки «Клиент» и «Telegram ID чата».
+
+    BOT_РАССЫЛКА для ежедневного курса больше не используется.
+    """
+    worksheet = get_clients_worksheet()
+    rows = worksheet.get_all_records()
+
+    chats = []
+    seen = set()
+
+    for row in rows:
+        client_name = str(row.get(CLIENT_COLUMN, "")).strip()
+        raw_chat_id = row.get(TELEGRAM_CHAT_ID_COLUMN, "")
+
+        chat_id = normalize_chat_id(raw_chat_id)
+
+        if not chat_id or chat_id in seen:
+            continue
+
+        seen.add(chat_id)
+        chats.append((chat_id, client_name or "Без названия"))
+
+    return chats
 
 
 def get_broadcast_groups():
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT chat_id, title, mode, message_id
-        FROM broadcast_groups
-        ORDER BY title
-    """)
-    rows = cur.fetchall()
-    conn.close()
+    """
+    Возвращает ТОЛЬКО строки, где Активен = ДА/АКТИВЕН/✅ и т.п.
+    Это единственный источник получателей рассылки.
+    """
+    sync_broadcast_registry_from_clients()
+
+    worksheet = get_broadcast_groups_worksheet()
+    values = worksheet.get_all_values()
+
+    rows = []
+
+    for row in values[1:]:
+        if not row:
+            continue
+
+        title = str(
+            row[0] if len(row) > 0 else ""
+        ).strip()
+
+        chat_id = normalize_telegram_id(
+            row[1] if len(row) > 1 else ""
+        )
+
+        active = str(
+            row[2] if len(row) > 2 else ""
+        ).strip()
+
+        mode = str(
+            row[3] if len(row) > 3 else "send"
+        ).strip() or "send"
+
+        message_id_raw = str(
+            row[4] if len(row) > 4 else ""
+        ).strip()
+
+        if not chat_id or not is_broadcast_active(active):
+            continue
+
+        try:
+            message_id = (
+                int(message_id_raw)
+                if message_id_raw
+                else None
+            )
+        except ValueError:
+            message_id = None
+
+        rows.append((
+            chat_id,
+            title,
+            mode,
+            message_id,
+        ))
+
+    rows.sort(
+        key=lambda item: (item[1] or "").casefold()
+    )
+
     return rows
+
+
+def log_broadcast_groups_count(prefix="BOT_РАССЫЛКА"):
+    try:
+        groups = get_broadcast_groups()
+        count = len(groups)
+
+        print(
+            f"{prefix}: активно {count} чатов",
+            flush=True,
+        )
+
+        return count
+
+    except Exception as exc:
+        print(
+            f"{prefix}: ошибка чтения списка чатов: {exc}",
+            flush=True,
+        )
+
+        return 0
 
 
 def parse_sheet_number(value):
@@ -1178,86 +1831,164 @@ def get_groups_message():
 
     if not rows:
         return (
-            "Группы рассылки пока не добавлены.\n\n"
-            "В группе можно использовать:\n"
-            "/addgroup — обычная рассылка\n"
-            "/addpin — закрепленное обновляемое сообщение"
+            "📣 Сейчас нет активных чатов для рассылки.\n\n"
+            "Управление рассылкой выполняется на листе "
+            f"«{BROADCAST_GROUPS_SHEET_NAME}».\n"
+            "Чтобы включить чат, поставьте в колонке «Активен» значение «ДА»."
         )
 
-    text = "📣 Группы рассылки:\n\n"
-    for index, (chat_id, title, mode, message_id) in enumerate(rows, start=1):
-        mode_text = "закреп" if mode == "pin" else "обычная рассылка"
-        pin_text = f"\nMessage ID: {message_id}" if message_id else ""
+    text = (
+        f"📣 Активные чаты рассылки: {len(rows)}\n\n"
+    )
+
+    for index, (chat_id, title, mode, message_id) in enumerate(
+        rows,
+        start=1,
+    ):
+        mode_text = (
+            "закреп"
+            if mode == "pin"
+            else "обычная рассылка"
+        )
+
         text += (
             f"{index}. {title}\n"
-            f"Режим: {mode_text}\n"
-            f"ID: {chat_id}{pin_text}\n\n"
+            f"ID: {chat_id}\n"
+            f"Режим: {mode_text}\n\n"
         )
 
     return text
 
 
-def broadcast():
+def send_custom_broadcast(text):
     groups = get_broadcast_groups()
 
+    print(
+        f"Ручная рассылка: найдено {len(groups)} чатов",
+        flush=True,
+    )
+
+    if not groups:
+        print(
+            "Ручная рассылка отменена: BOT_РАССЫЛКА пуст",
+            flush=True,
+        )
+        return 0, 0
+
+    success = 0
+    errors = 0
+
+    # Тестовый режим:
+    # если в Render задан TEST_BROADCAST_CHAT_ID,
+    # рассылка идет только в этот чат.
+    if TEST_BROADCAST_CHAT_ID:
+        groups = [
+            group
+            for group in groups
+            if str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+        ]
+
+    sent_chat_ids = set()
+
     for chat_id, title, mode, message_id in groups:
+        if str(chat_id) in sent_chat_ids:
+            continue
+
         try:
-            if mode == "pin":
-                pin_text = build_pin_message()
+            send_message(chat_id, text)
 
-                if message_id:
-                    try:
-                        edit_message(chat_id, message_id, pin_text)
-                    except Exception:
-                        sent = send_message(chat_id, pin_text)
-                        new_message_id = sent["result"]["message_id"]
-                        pin_message(chat_id, new_message_id)
-                        update_group_message_id(chat_id, new_message_id)
-                else:
-                    sent = send_message(chat_id, pin_text)
-                    new_message_id = sent["result"]["message_id"]
-                    pin_message(chat_id, new_message_id)
-                    update_group_message_id(chat_id, new_message_id)
-            else:
-                send_message(chat_id, build_message())
+            sent_chat_ids.add(str(chat_id))
+            success += 1
 
-            print(f"Рассылка выполнена: {title}", flush=True)
+            print(
+                f"Массовая рассылка отправлена: {title} ({chat_id})",
+                flush=True,
+            )
+
         except Exception as exc:
-            print(f"Ошибка отправки в {title}: {exc}", flush=True)
+            errors += 1
 
+            print(
+                f"Ошибка массовой рассылки в {title} ({chat_id}): {exc}",
+                flush=True,
+            )
 
-def auto_broadcast_loop():
-    last_sent_date = None
+    return success, errors
 
-    while True:
-        now = datetime.now(ZoneInfo(TIMEZONE))
+def broadcast(date_iso=None):
+    """
+    Ежедневная автоматическая рассылка курса.
 
-        if now.hour == 11 and now.minute == 0:
-            today = now.strftime("%Y-%m-%d")
+    Получатели берутся ТОЛЬКО из:
+    JAPAN_SPREADSHEET_ID -> лист «Клиенты» -> «Telegram ID чата».
 
-            if last_sent_date != today and has_today_rate():
-                broadcast()
-                last_sent_date = today
+    Каждый chat_id получает курс максимум один раз за дату.
+    Отметка хранится в BOT_СОСТОЯНИЕ, поэтому restart/deploy Render
+    не вызывает повторную рассылку.
+    """
+    if date_iso is None:
+        date_iso = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
 
-        time.sleep(30)
+    chats = get_currency_broadcast_chats_from_clients()
 
+    print(
+        f"Автоматическая рассылка курса: найдено {len(chats)} чатов в листе Клиенты",
+        flush=True,
+    )
 
-def parse_rates_from_text(text):
-    clean_text = text.replace(",", ".")
-    numbers = re.findall(r"\d+(?:\.\d+)?", clean_text)
+    if not chats:
+        print(
+            "Автоматическая рассылка курса отменена: "
+            "в листе Клиенты нет Telegram ID чатов",
+            flush=True,
+        )
+        return 0, 0, 0
 
-    if len(numbers) < 2:
-        return None
+    success = 0
+    errors = 0
+    skipped = 0
 
-    return {
-        "usd_rub": float(numbers[0]),
-        "jpy_rub": float(numbers[1]),
-    }
+    for chat_id, client_name in chats:
+        state_key = rate_broadcast_state_key(date_iso, chat_id)
 
+        try:
+            already_sent = get_bot_state(state_key)
 
-# ============================================================
-# ОБРАБОТКА ОБНОВЛЕНИЙ TELEGRAM
-# ============================================================
+            if already_sent == "SENT":
+                skipped += 1
+                print(
+                    f"Курс уже отправлен сегодня: {client_name} ({chat_id})",
+                    flush=True,
+                )
+                continue
+
+            # Ежедневный курс — обычное новое сообщение.
+            # Никаких pin/edit и никакого BOT_РАССЫЛКА.
+            send_message(chat_id, build_message())
+
+            # Ставим отметку только ПОСЛЕ успешной отправки.
+            set_bot_state(state_key, "SENT")
+
+            success += 1
+            print(
+                f"Курс отправлен: {client_name} ({chat_id})",
+                flush=True,
+            )
+
+        except Exception as exc:
+            errors += 1
+            print(
+                f"Ошибка отправки курса: {client_name} ({chat_id}): {exc}",
+                flush=True,
+            )
+
+    print(
+        f"Автоматическая рассылка курса завершена: "
+        f"успешно {success}, уже отправлено {skipped}, ошибок {errors}",
+        flush=True,
+    )
+    return success, errors, skipped
+
 
 def handle_message(data):
     message = data.get("message")
@@ -1291,13 +2022,25 @@ def handle_message(data):
 
     if text_lower in ["/debugcars", "/debugавто"]:
         if not private_chat or not admin:
-            send_message(chat_id, "Команда доступна только администратору.", reply_markup)
+            send_message(
+                chat_id,
+                "Команда доступна только администратору.",
+                reply_markup,
+            )
             return
 
         try:
-            send_message(chat_id, build_debug_cars_message(user_id), reply_markup)
+            send_message(
+                chat_id,
+                build_debug_cars_message(user_id),
+                reply_markup,
+            )
         except Exception as exc:
-            send_message(chat_id, f"DEBUG ERROR: {exc}", reply_markup)
+            send_message(
+                chat_id,
+                f"DEBUG ERROR: {exc}",
+                reply_markup,
+            )
         return
 
     if text_lower in [
@@ -1306,11 +2049,17 @@ def handle_message(data):
         "/cars",
         "/авто",
     ]:
-        send_message(
-            chat_id,
-            MAINTENANCE_MESSAGE,
-            reply_markup,
-        )
+        try:
+            access_id = user_id if private_chat else chat_id
+            show_client_cars(chat_id, access_id)
+        except Exception as exc:
+            print(f"Ошибка получения автомобилей: {exc}", flush=True)
+            send_message(
+                chat_id,
+                "Не удалось получить данные по автомобилям. "
+                "Попробуйте повторить запрос немного позже.",
+                reply_markup,
+            )
         return
 
     if text_lower == "/addgroup":
@@ -1323,7 +2072,11 @@ def handle_message(data):
             return
 
         add_broadcast_group(chat_id, title, mode="send")
-        send_message(chat_id, "✅ Группа добавлена в рассылку.", reply_markup)
+        send_message(
+            chat_id,
+            "✅ Группа добавлена в рассылку.",
+            reply_markup,
+        )
         return
 
     if text_lower == "/addpin":
@@ -1373,6 +2126,74 @@ def handle_message(data):
         send_message(chat_id, get_groups_message(), reply_markup)
         return
 
+    if text_lower == "/cancelbroadcast":
+        waiting_for_custom_broadcast.discard(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+        send_message(
+            chat_id,
+            "Создание рассылки отменено ❌",
+            reply_markup,
+        )
+        return
+
+    if chat_id in waiting_for_custom_broadcast:
+        if not private_chat or not admin:
+            waiting_for_custom_broadcast.discard(chat_id)
+            pending_custom_broadcast.pop(chat_id, None)
+            return
+
+        if not text:
+            send_message(
+                chat_id,
+                "Пришлите текстовое сообщение для рассылки.",
+                reply_markup,
+            )
+            return
+
+        groups = get_broadcast_groups()
+        unique_chat_ids = {str(group[0]) for group in groups}
+
+        if TEST_BROADCAST_CHAT_ID:
+            preview_count = sum(
+                1
+                for group in groups
+                if str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+            )
+            preview_mode = "\n🧪 Тестовый режим: отправка только в тестовый чат."
+        else:
+            preview_count = len(unique_chat_ids)
+            preview_mode = ""
+
+        pending_custom_broadcast[chat_id] = text
+        waiting_for_custom_broadcast.discard(chat_id)
+
+        preview_keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Отправить",
+                        "callback_data": "custom_broadcast_confirm",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": "custom_broadcast_cancel",
+                    },
+                ]
+            ]
+        }
+
+        send_message(
+            chat_id,
+            "📣 Предпросмотр рассылки:\n\n"
+            f"{text}\n\n"
+            "──────────────\n"
+            f"Получателей: {preview_count}"
+            f"{preview_mode}\n\n"
+            "Отправить это сообщение?",
+            reply_markup=preview_keyboard,
+        )
+        return
+
     if chat_id in waiting_for_rate:
         if not private_chat or not admin:
             waiting_for_rate.discard(chat_id)
@@ -1398,27 +2219,29 @@ def handle_message(data):
         return
 
     if text_lower in ["/start", "старт"]:
-        if admin and private_chat:
+        if private_chat:
             send_message(
                 chat_id,
-                "Бот запущен ✅\n\n"
-                "Автоматические рассылки временно на паузе.\n"
-                "Курс можно внести и отправить вручную через "
-                "«📣 Массовая рассылка».",
+                "Бот запущен ✅\n\nВыберите действие в меню:",
                 reply_markup,
             )
         else:
             send_message(
                 chat_id,
-                "📊 Курс доступен в обычном режиме.\n\n"
-                + MAINTENANCE_MESSAGE,
+                "Бот запущен ✅\n\nВ группе доступна команда /курс",
                 reply_markup,
             )
+        return
 
-    elif text_lower in ["/kurs", "/курс", "📊 курс", "курс"]:
+    command_lower = text_lower.split("@", 1)[0] if text_lower.startswith("/") else text_lower
+
+    if command_lower in ["/kurs", "/курс"] or text_lower in ["📊 курс", "курс"]:
+        # ВАЖНО: /курс отвечает ТОЛЬКО в том чате, где его запросили.
+        # Никакой массовой рассылки отсюда не запускается.
         send_message(chat_id, build_message(), reply_markup)
+        return
 
-    elif text_lower in ["➕ внести курс", "внести курс"]:
+    if text_lower in ["➕ внести курс", "внести курс"]:
         if not private_chat or not admin:
             send_message(
                 chat_id,
@@ -1434,8 +2257,9 @@ def handle_message(data):
             "1-я строка — USD/RUB\n2-я строка — JPY/RUB",
             reply_markup,
         )
+        return
 
-    elif text_lower.startswith("/addrate"):
+    if text_lower.startswith("/addrate"):
         if not private_chat or not admin:
             send_message(chat_id, "Нет доступа.", reply_markup)
             return
@@ -1451,9 +2275,14 @@ def handle_message(data):
             return
 
         save_rate(rates["usd_rub"], rates["jpy_rub"])
-        send_message(chat_id, "Курсы сохранены ✅\n\n" + build_message())
+        send_message(
+            chat_id,
+            "Курсы сохранены ✅\n\n" + build_message(),
+            reply_markup,
+        )
+        return
 
-    elif text_lower in ["/status", "✅ статус", "статус"]:
+    if text_lower in ["/status", "✅ статус", "статус"]:
         if admin:
             try:
                 get_japan_spreadsheet()
@@ -1468,36 +2297,141 @@ def handle_message(data):
             )
         else:
             send_message(chat_id, "Бот работает ✅", reply_markup)
+        return
 
-    elif text_lower in ["/chats", "💬 чаты", "чаты"]:
+    if text_lower in ["/chats", "💬 чаты", "чаты"]:
         if not private_chat or not admin:
             send_message(chat_id, "Нет доступа.", reply_markup)
             return
 
         send_message(chat_id, get_chats_message(), reply_markup)
+        return
 
-    elif text_lower in ["/broadcast", "📣 рассылка", "рассылка", "📣 массовая рассылка", "массовая рассылка"]:
+    if text_lower in ["/broadcast", "📣 рассылка", "рассылка"]:
         if not private_chat or not admin:
             send_message(chat_id, "Нет доступа.", reply_markup)
             return
 
-        if has_today_rate():
-            broadcast()
-            send_message(chat_id, "Рассылка выполнена ✅", reply_markup)
-        else:
+        groups = get_broadcast_groups()
+
+        if not groups:
             send_message(
                 chat_id,
-                "Курс за сегодня еще не внесен.",
+                "Нет групп, подключенных к рассылке.",
                 reply_markup,
             )
+            return
 
+        if TEST_BROADCAST_CHAT_ID:
+            test_group_found = any(
+                str(group[0]) == str(TEST_BROADCAST_CHAT_ID)
+                for group in groups
+            )
+
+            if not test_group_found:
+                send_message(
+                    chat_id,
+                    "🧪 Включён тестовый режим, но тестовый чат "
+                    "не найден среди групп рассылки.\n\n"
+                    "Проверь TEST_BROADCAST_CHAT_ID.",
+                    reply_markup,
+                )
+                return
+
+        waiting_for_custom_broadcast.add(chat_id)
+        pending_custom_broadcast.pop(chat_id, None)
+
+        send_message(
+            chat_id,
+            "📣 Создание новой рассылки\n\n"
+            "Отправьте следующим сообщением текст, "
+            "который нужно разослать всем подключенным группам.\n\n"
+            "Для отмены отправьте /cancelbroadcast",
+            reply_markup,
+        )
+        return
 
 def handle_update(data):
-    if data.get("callback_query"):
+    callback_query = data.get("callback_query")
+
+    if callback_query:
+        callback_data = callback_query.get("data", "")
+        callback_id = callback_query.get("id")
+        user_id = callback_query.get("from", {}).get("id")
+
+        message = callback_query.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+
+        # ====================================================
+        # ПОДТВЕРЖДЕНИЕ МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_confirm":
+            answer_callback_query(callback_id)
+
+            if not is_admin(user_id):
+                send_message(chat_id, "Нет доступа.")
+                return
+
+            broadcast_text = pending_custom_broadcast.get(chat_id)
+
+            if not broadcast_text:
+                send_message(
+                    chat_id,
+                    "Черновик рассылки не найден. Создайте рассылку заново.",
+                )
+                return
+
+            # Сначала удаляем черновик, чтобы двойное нажатие
+            # не запустило повторную рассылку
+            pending_custom_broadcast.pop(chat_id, None)
+
+            send_message(
+                chat_id,
+                "📤 Начинаю рассылку...",
+            )
+
+            success, errors = send_custom_broadcast(broadcast_text)
+
+            result_text = (
+                f"Рассылка завершена ✅\n\n"
+                f"Успешно отправлено: {success}"
+            )
+
+            if errors:
+                result_text += f"\nОшибок: {errors}"
+
+            send_message(chat_id, result_text)
+            return
+
+        # ====================================================
+        # ОТМЕНА МАССОВОЙ РАССЫЛКИ
+        # ====================================================
+
+        if callback_data == "custom_broadcast_cancel":
+            answer_callback_query(callback_id)
+
+            pending_custom_broadcast.pop(chat_id, None)
+            waiting_for_custom_broadcast.discard(chat_id)
+
+            send_message(
+                chat_id,
+                "Рассылка отменена ❌",
+            )
+            return
+
+        # ====================================================
+        # ОСТАЛЬНЫЕ INLINE-КНОПКИ — АВТОМОБИЛИ
+        # ====================================================
+
         try:
-            handle_car_callback(data["callback_query"])
+            handle_car_callback(callback_query)
         except Exception as exc:
-            print(f"Ошибка callback_query: {exc}", flush=True)
+            print(
+                f"Ошибка callback_query: {exc}",
+                flush=True,
+            )
+
         return
 
     handle_message(data)
@@ -1523,11 +2457,82 @@ def webhook():
     return "ok"
 
 
+def auto_broadcast_loop():
+    """
+    После 11:00 проверяет наличие курса за сегодня.
+
+    Повторные deploy/restart безопасны:
+    каждый успешно обработанный чат помечается в BOT_СОСТОЯНИЕ,
+    поэтому курс туда второй раз в тот же день не отправляется.
+    """
+    while True:
+        try:
+            now = datetime.now(ZoneInfo(TIMEZONE))
+
+            if now.hour >= 11 and has_today_rate():
+                today = now.strftime("%Y-%m-%d")
+
+                success, errors, skipped = broadcast(today)
+
+                if success or errors:
+                    print(
+                        f"Проверка автокурса за {today}: "
+                        f"новых отправок {success}, "
+                        f"уже отправлено {skipped}, "
+                        f"ошибок {errors}",
+                        flush=True,
+                    )
+
+        except Exception as exc:
+            print(
+                f"Ошибка автоматической рассылки курса: {exc}",
+                flush=True,
+            )
+
+        time.sleep(60)
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не задан")
 
     init_db()
+
+    try:
+        get_broadcast_groups_worksheet()
+        get_snapshot_worksheet()
+        get_state_worksheet()
+
+        migrated_count = migrate_old_broadcast_groups()
+        synced_count = sync_broadcast_registry_from_clients()
+
+        print(
+            "Постоянное Google-хранилище бота подключено ✅",
+            flush=True,
+        )
+        print(
+            f"Реестр рассылки: {BROADCAST_GROUPS_SHEET_NAME} "
+            "в GOOGLE_SPREADSHEET_ID",
+            flush=True,
+        )
+
+        if migrated_count:
+            print(
+                f"BOT_РАССЫЛКА: перенесено {migrated_count} старых чатов "
+                "из BOT_ГРУППЫ",
+                flush=True,
+            )
+
+        if synced_count:
+            print(
+                f"BOT_РАССЫЛКА: добавлено {synced_count} чатов "
+                "из листа «Клиенты»",
+                flush=True,
+            )
+
+        log_broadcast_groups_count()
+    except Exception as exc:
+        print(f"Ошибка подключения Google-хранилища бота: {exc}", flush=True)
 
     try:
         get_rates_worksheet()
@@ -1541,12 +2546,15 @@ def main():
     except Exception as exc:
         print(f"Ошибка подключения таблицы логистики: {exc}", flush=True)
 
-    # Автоматические рассылки временно отключены.
-    # Курс отправляется только вручную администратором
-    # через кнопку «📣 Массовая рассылка».
-    #
-    # Автоматические уведомления по автомобилям также
-    # временно приостановлены на период технических работ.
+    threading.Thread(
+        target=auto_broadcast_loop,
+        daemon=True,
+    ).start()
+
+    threading.Thread(
+        target=logistics_watch_loop,
+        daemon=True,
+    ).start()
 
     port = int(os.getenv("PORT", "10000"))
     print("Бот запускается...", flush=True)
