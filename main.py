@@ -1674,19 +1674,31 @@ def get_currency_broadcast_chats_from_clients():
 
     BOT_РАССЫЛКА для ежедневного курса больше не используется.
     """
-    worksheet = get_clients_worksheet()
-    rows = worksheet.get_all_records()
+    rows = get_clients_rows()
 
     chats = []
     seen = set()
 
     for row in rows:
         client_name = str(row.get(CLIENT_COLUMN, "")).strip()
-        raw_chat_id = row.get(TELEGRAM_CHAT_ID_COLUMN, "")
+        raw_chat_id = row.get(TELEGRAM_ID_COLUMN, "")
 
-        chat_id = normalize_chat_id(raw_chat_id)
+        chat_id_text = normalize_telegram_id(raw_chat_id)
 
-        if not chat_id or chat_id in seen:
+        if not chat_id_text:
+            continue
+
+        try:
+            chat_id = int(chat_id_text)
+        except ValueError:
+            print(
+                f"Пропущен некорректный Telegram ID в листе Клиенты: "
+                f"{client_name} / {raw_chat_id}",
+                flush=True,
+            )
+            continue
+
+        if chat_id in seen:
             continue
 
         seen.add(chat_id)
@@ -2688,4 +2700,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
