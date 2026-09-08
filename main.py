@@ -783,6 +783,66 @@ def get_active_cars_for_client(client_name, logistics_rows=None):
     ]
 
 
+def parse_sheet_date(value):
+    """
+    Пытается разобрать дату из Google Sheets.
+    Поддерживает основные форматы, которые встречаются в таблице.
+    """
+    raw = str(value or "").strip()
+
+    if not raw:
+        return None
+
+    # Иногда Google Sheets возвращает дату вместе со временем.
+    candidates = [
+        raw,
+        raw.split(" ")[0],
+        raw.split("T")[0],
+    ]
+
+    patterns = (
+        "%d.%m.%Y",
+        "%d.%m.%y",
+        "%d/%m/%Y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+    )
+
+    for candidate in candidates:
+        candidate = candidate.strip()
+
+        for pattern in patterns:
+            try:
+                return datetime.strptime(candidate, pattern).date()
+            except ValueError:
+                pass
+
+    return None
+
+
+def is_fact_date_effective(value):
+    """
+    Фактический этап считается состоявшимся только когда его дата
+    наступила: дата факта <= сегодняшней даты во Владивостоке.
+
+    Если формат даты неожиданно не удалось разобрать, сохраняем
+    старое поведение и считаем непустое значение фактом.
+    """
+    if not is_nonempty(value):
+        return False
+
+    parsed = parse_sheet_date(value)
+
+    if parsed is None:
+        return True
+
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    return parsed <= today
+
+
 def format_date(value):
     text = str(value or "").strip()
 
@@ -804,51 +864,52 @@ def get_current_stage(row):
     """Определяет фактический статус автомобиля.
 
     Плановые даты не меняют текущий статус.
+    Фактическая дата из будущего тоже не меняет статус до наступления даты.
     """
 
-    if is_nonempty(row.get(RELEASE_DATE_COLUMN)):
+    if is_fact_date_effective(row.get(RELEASE_DATE_COLUMN)):
         return {
             "code": "released",
             "name": "Автомобиль выпущен",
             "completed": True,
         }
 
-    if is_nonempty(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
+    if is_fact_date_effective(row.get(RUSSIA_ARRIVAL_FACT_COLUMN)):
         return {
             "code": "russia_arrived",
             "name": "Автомобиль прибыл в Россию и ожидает выпуска",
             "completed": False,
         }
 
-    if is_nonempty(row.get(CHINA_EXIT_FACT_COLUMN)):
+    if is_fact_date_effective(row.get(CHINA_EXIT_FACT_COLUMN)):
         return {
             "code": "left_china",
             "name": "Автомобиль следует в Россию",
             "completed": False,
         }
 
-    if is_nonempty(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
+    if is_fact_date_effective(row.get(CHINA_KOREA_ARRIVAL_COLUMN)):
         return {
             "code": "china_arrived",
             "name": "Автомобиль прибыл в порт перегруза и ожидает дальнейшую отправку",
             "completed": False,
         }
 
-    if is_nonempty(row.get(JAPAN_EXIT_FACT_COLUMN)):
+    if is_fact_date_effective(row.get(JAPAN_EXIT_FACT_COLUMN)):
         return {
             "code": "left_japan",
             "name": "Автомобиль следует в порт перегруза",
             "completed": False,
         }
 
-    if is_nonempty(row.get(CONTAINER_LOADING_FACT_COLUMN)):
+    if is_fact_date_effective(row.get(CONTAINER_LOADING_FACT_COLUMN)):
         return {
             "code": "loaded",
             "name": "Автомобиль погружен и ожидает отправку из Японии",
             "completed": False,
         }
 
-    if is_nonempty(row.get(YARD_FACT_COLUMN)):
+    if is_fact_date_effective(row.get(YARD_FACT_COLUMN)):
         return {
             "code": "on_yard",
             "name": "Автомобиль находится на ярде и ожидает погрузку",
@@ -1228,6 +1289,24 @@ def check_logistics_updates():
             old_value = snapshot[key]
 
             if new_value == old_value:
+                continue
+
+            event_title, value_type = TRACKED_COLUMNS[column_name]
+
+            # Если коллега заранее поставил ФАКТ-дату из будущего,
+            # клиенту ничего не отправляем и snapshot НЕ двигаем.
+            # Благодаря этому в день наступления даты бот увидит её
+            # как новое фактическое событие и отправит уведомление.
+            if (
+                value_type == "fact"
+                and new_value
+                and not is_fact_date_effective(new_value)
+            ):
+                print(
+                    f"Будущий факт отложен до наступления даты: "
+                    f"{car_key} / {column_name} / {new_value}",
+                    flush=True,
+                )
                 continue
 
             snapshot[key] = new_value
@@ -2457,6 +2536,46 @@ def webhook():
     return "ok"
 
 
+def bootstrap_today_currency_broadcast():
+    """
+    Одноразовая защита при переходе на новую схему.
+
+    На первом запуске этой версии помечает текущую дату как уже обработанную
+    для всех чатов из листа «Клиенты». Это не дает отправить сегодняшний
+    курс ещё раз сразу после deploy.
+
+    Со следующей календарной даты автокурс работает штатно в 11:00.
+    """
+    bootstrap_key = "currency_broadcast_bootstrap_v1"
+
+    try:
+        if get_bot_state(bootstrap_key) == "DONE":
+            return
+
+        today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
+        chats = get_currency_broadcast_chats_from_clients()
+
+        for chat_id, client_name in chats:
+            state_key = rate_broadcast_state_key(today, chat_id)
+
+            if get_bot_state(state_key) != "SENT":
+                set_bot_state(state_key, "SENT")
+
+        set_bot_state(bootstrap_key, "DONE")
+
+        print(
+            f"Защита автокурса активирована: "
+            f"текущий день {today} помечен как уже отправленный",
+            flush=True,
+        )
+
+    except Exception as exc:
+        print(
+            f"Ошибка одноразовой защиты автокурса: {exc}",
+            flush=True,
+        )
+
+
 def auto_broadcast_loop():
     """
     После 11:00 проверяет наличие курса за сегодня.
@@ -2546,6 +2665,8 @@ def main():
     except Exception as exc:
         print(f"Ошибка подключения таблицы логистики: {exc}", flush=True)
 
+    bootstrap_today_currency_broadcast()
+
     threading.Thread(
         target=auto_broadcast_loop,
         daemon=True,
@@ -2567,3 +2688,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
