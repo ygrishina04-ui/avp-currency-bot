@@ -5,7 +5,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -843,6 +843,22 @@ def is_fact_date_effective(value):
     return parsed <= today
 
 
+
+def is_fact_notification_fresh(value, max_age_days=3):
+    if not is_nonempty(value):
+        return False
+
+    parsed = parse_sheet_date(value)
+    if parsed is None:
+        return True
+
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+
+    if parsed > today:
+        return False
+
+    return parsed >= (today - timedelta(days=max_age_days))
+
 def format_date(value):
     text = str(value or "").strip()
 
@@ -1304,6 +1320,34 @@ def check_logistics_updates():
             ):
                 print(
                     f"Будущий факт отложен до наступления даты: "
+                    f"{car_key} / {column_name} / {new_value}",
+                    flush=True,
+                )
+                continue
+
+            if (
+                value_type == "fact"
+                and new_value
+                and not is_fact_notification_fresh(new_value)
+            ):
+                snapshot[key] = new_value
+                existing_row_number = row_numbers.get(key)
+
+                if existing_row_number:
+                    batch_updates.append({
+                        "range": f"C{existing_row_number}:D{existing_row_number}",
+                        "values": [[new_value, now]],
+                    })
+                else:
+                    rows_to_append.append([
+                        car_key,
+                        column_name,
+                        new_value,
+                        now,
+                    ])
+
+                print(
+                    f"Старый факт синхронизирован без уведомления: "
                     f"{car_key} / {column_name} / {new_value}",
                     flush=True,
                 )
@@ -1837,40 +1881,74 @@ def get_latest_rate():
     if len(rows) < 2:
         return None
 
-    latest_row = None
-    for row in reversed(rows[1:]):
-        if any(str(cell).strip() for cell in row):
-            latest_row = row
-            break
+    candidates = []
 
-    if not latest_row or len(latest_row) < 3:
+    for row_index, row in enumerate(rows[1:], start=2):
+        if len(row) < 3:
+            continue
+
+        date_text = str(row[0]).strip()
+        if not date_text:
+            continue
+
+        parsed_date = None
+        for pattern in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                parsed_date = datetime.strptime(date_text, pattern).date()
+                break
+            except ValueError:
+                pass
+
+        if parsed_date is None:
+            continue
+
+        try:
+            usd_rub_input = parse_sheet_number(row[1])
+            usd_jpy_input = parse_sheet_number(row[2])
+        except Exception:
+            continue
+
+        if usd_rub_input <= 0 or usd_jpy_input <= 0:
+            continue
+
+        candidates.append(
+            (parsed_date, row_index, date_text, usd_rub_input, usd_jpy_input)
+        )
+
+    if not candidates:
         return None
 
-    date = str(latest_row[0]).strip()
-    usd_rub_input = parse_sheet_number(latest_row[1])
-    usd_jpy_input = parse_sheet_number(latest_row[2])
-
-    if usd_rub_input <= 0 or usd_jpy_input <= 0:
-        raise ValueError("В последней строке BOT_КУРСЫ некорректные значения")
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _d, _i, date_text, usd_rub_input, usd_jpy_input = candidates[-1]
 
     jpy_rub_input = (usd_rub_input / usd_jpy_input) * 100
 
     return (
-        date,
+        date_text,
         usd_rub_input * DISCOUNT_FACTOR,
         usd_jpy_input * DISCOUNT_FACTOR,
         jpy_rub_input * DISCOUNT_FACTOR,
     )
-
 
 def has_today_rate():
     rate = get_latest_rate()
     if not rate:
         return False
 
-    today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d.%m.%Y")
-    return rate[0] == today
+    rate_date_text = str(rate[0]).strip()
+    rate_date = None
 
+    for pattern in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            rate_date = datetime.strptime(rate_date_text, pattern).date()
+            break
+        except ValueError:
+            pass
+
+    if rate_date is None:
+        return False
+
+    return rate_date == datetime.now(ZoneInfo(TIMEZONE)).date()
 
 def build_message():
     rate = get_latest_rate()
@@ -2566,6 +2644,13 @@ def bootstrap_today_currency_broadcast():
 
         today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
         chats = get_currency_broadcast_chats_from_clients()
+
+        if not chats:
+            print(
+                "Защита автокурса: чатов пока нет, bootstrap не закрываем",
+                flush=True,
+            )
+            return
 
         for chat_id, client_name in chats:
             state_key = rate_broadcast_state_key(today, chat_id)
