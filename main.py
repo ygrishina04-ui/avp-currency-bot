@@ -1849,6 +1849,46 @@ def parse_sheet_number(value):
     return float(normalized)
 
 
+
+def parse_rates_from_text(text):
+    """
+    Разбирает ввод курса из сообщения.
+
+    Поддерживает:
+    89,00
+    58,40
+
+    и:
+    /addrate 89,00 58,40
+    """
+    raw = str(text or "").strip()
+
+    if not raw:
+        return None
+
+    # Для /addrate убираем саму команду.
+    raw = re.sub(r"^/addrate(?:@\w+)?\s*", "", raw, flags=re.IGNORECASE)
+
+    # Ищем числа с запятой или точкой.
+    numbers = re.findall(r"-?\d+(?:[.,]\d+)?", raw)
+
+    if len(numbers) < 2:
+        return None
+
+    try:
+        usd_rub = float(numbers[0].replace(",", "."))
+        jpy_rub = float(numbers[1].replace(",", "."))
+    except ValueError:
+        return None
+
+    if usd_rub <= 0 or jpy_rub <= 0:
+        return None
+
+    return {
+        "usd_rub": usd_rub,
+        "jpy_rub": jpy_rub,
+    }
+
 def save_rate(usd_rub, jpy_rub):
     if usd_rub <= 0 or jpy_rub <= 0:
         raise ValueError("Курсы должны быть больше нуля")
