@@ -2809,10 +2809,9 @@ def main():
         daemon=True,
     ).start()
 
-    threading.Thread(
-        target=logistics_watch_loop,
-        daemon=True,
-    ).start()
+    # Автоматические уведомления об автомобилях отключены.
+    # Ручной запрос по кнопке и /cars продолжает работать.
+    print("Автоуведомления отключены; ручной запрос автомобилей доступен", flush=True)
 
     port = int(os.getenv("PORT", "10000"))
     print("Бот запускается...", flush=True)
