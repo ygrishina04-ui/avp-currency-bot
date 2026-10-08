@@ -1008,29 +1008,40 @@ def encode_car_body(body_number):
     return f"car:{normalize_body_number(body_number)}"
 
 
-def build_cars_keyboard(cars):
+def build_cars_keyboard(cars, view="active"):
+    """Актуальные в главном меню; завершённые — отдельным разделом."""
+    active = [car for car in cars if is_car_active(car)]
+    delivered = [car for car in cars if not is_car_active(car)]
+    selected = delivered if view == "delivered" else active
     buttons = []
 
-    for car in cars:
+    for car in selected:
         model = str(car.get(CAR_MODEL_COLUMN, "")).strip() or "Автомобиль"
         body = str(car.get(BODY_NUMBER_COLUMN, "")).strip()
-        completed = is_nonempty(car.get(RELEASE_DATE_COLUMN))
-        suffix = " ✅" if completed else ""
-        text = f"{model} / {body}{suffix}"
-
+        text = f"{model} / {body}"
         if len(text) > 60:
-            text = f"{model[:28]}… / {body[-22:]}{suffix}"
+            text = f"{model[:28]}… / {body[-22:]}"
+        buttons.append([{"text": text, "callback_data": encode_car_body(body)}])
 
-        buttons.append(
-            [
-                {
-                    "text": text,
-                    "callback_data": encode_car_body(body),
-                }
-            ]
-        )
+    if view == "delivered":
+        buttons.append([{"text": "⬅️ К актуальным автомобилям", "callback_data": "cars:active"}])
+    elif delivered:
+        buttons.append([{
+            "text": f"✅ Доставленные автомобили ({len(delivered)})",
+            "callback_data": "cars:delivered",
+        }])
 
     return {"inline_keyboard": buttons}
+
+
+def build_cars_menu_text(cars, view="active"):
+    active_count = sum(1 for car in cars if is_car_active(car))
+    delivered_count = len(cars) - active_count
+    if view == "delivered":
+        return f"✅ Доставленные автомобили ({delivered_count})\nВыберите автомобиль:"
+    if not active_count:
+        return "🚗 Актуальных автомобилей пока нет.\nОткройте раздел доставленных автомобилей:"
+    return f"🚗 Актуальные автомобили ({active_count})\nВыберите автомобиль:"
 
 
 def show_client_cars(chat_id, telegram_id):
@@ -1045,19 +1056,14 @@ def show_client_cars(chat_id, telegram_id):
         )
         return
 
-    logistics_rows = get_logistics_rows()
-    cars = get_cars_for_client(client_name, logistics_rows)
-
+    cars = get_cars_for_client(client_name, get_logistics_rows())
     if not cars:
-        send_message(
-            chat_id,
-            "Автомобили по вашему аккаунту не найдены.",
-        )
+        send_message(chat_id, "Автомобили по вашему аккаунту не найдены.")
         return
 
     send_message(
         chat_id,
-        "Выберите автомобиль:",
+        build_cars_menu_text(cars),
         reply_markup=build_cars_keyboard(cars),
     )
 
@@ -1068,47 +1074,73 @@ def handle_car_callback(callback_query):
     message = callback_query.get("message", {})
     chat = message.get("chat", {})
     chat_id = chat.get("id")
+    message_id = message.get("message_id")
     chat_type = chat.get("type")
     user_id = callback_query.get("from", {}).get("id")
     access_id = user_id if chat_type == "private" else chat_id
 
-    if not callback_id or not chat_id or not data.startswith("car:"):
+    if not callback_id or not chat_id or not (
+        data.startswith("car:") or data in ("cars:active", "cars:delivered")
+    ):
         return
 
     answer_callback_query(callback_id)
-    requested_body = normalize_body_number(data.split(":", 1)[1])
-
-    if not requested_body:
-        send_message(chat_id, "Не удалось определить номер кузова.")
-        return
-
-    clients_rows = get_clients_rows()
-    client_name = get_client_by_telegram_id(access_id, clients_rows)
-
+    client_name = get_client_by_telegram_id(access_id, get_clients_rows())
     if not client_name:
         send_message(chat_id, "Этот аккаунт или чат не привязан к дилеру.")
         return
 
     logistics_rows = get_logistics_rows()
-    selected_car = next(
-        (
-            row
-            for row in logistics_rows
-            if normalize_body_number(row.get(BODY_NUMBER_COLUMN)) == requested_body
-            and normalize_client_name(row.get(CLIENT_COLUMN, ""))
-            == normalize_client_name(client_name)
-        ),
-        None,
-    )
+    cars = get_cars_for_client(client_name, logistics_rows)
 
-    if not selected_car:
-        send_message(
+    if data in ("cars:active", "cars:delivered"):
+        view = "delivered" if data == "cars:delivered" else "active"
+        edit_message_with_markup(
             chat_id,
-            "Автомобиль не найден. Обновите список и попробуйте ещё раз.",
+            message_id,
+            build_cars_menu_text(cars, view),
+            build_cars_keyboard(cars, view),
         )
         return
 
-    send_message(chat_id, format_car_status(selected_car))
+    requested_body = normalize_body_number(data.split(":", 1)[1])
+    if not requested_body:
+        send_message(chat_id, "Не удалось определить номер кузова.")
+        return
+
+    selected_car = next(
+        (
+            row for row in cars
+            if normalize_body_number(row.get(BODY_NUMBER_COLUMN)) == requested_body
+        ),
+        None,
+    )
+    if not selected_car:
+        edit_message_with_markup(
+            chat_id,
+            message_id,
+            "Автомобиль не найден. Запросите список заново.",
+            None,
+        )
+        return
+
+    # Меню исчезает: то же сообщение превращается в итоговый статус.
+    edit_message_with_markup(chat_id, message_id, format_car_status(selected_car), None)
+
+
+def edit_message_with_markup(chat_id, message_id, text, reply_markup=None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    else:
+        payload["reply_markup"] = {"inline_keyboard": []}
+    try:
+        return telegram_api("editMessageText", payload)
+    except Exception as exc:
+        # Двойной клик или повторное открытие того же раздела.
+        if "message is not modified" in str(exc).lower():
+            return None
+        raise
 
 
 def build_debug_cars_message(telegram_id):
